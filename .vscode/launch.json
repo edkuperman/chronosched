@@ -1,0 +1,25 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run API",
+      "type": "go",
+      "request": "launch",
+      "mode": "auto",
+      "program": "${workspaceFolder}/cmd/server",
+      "env": {
+        "DATABASE_URL": "postgres://postgres:postgres@localhost:5432/chronosched?sslmode=disable"
+      }
+    },
+    {
+      "name": "Run Worker",
+      "type": "go",
+      "request": "launch",
+      "mode": "auto",
+      "program": "${workspaceFolder}/cmd/worker",
+      "env": {
+        "DATABASE_URL": "postgres://postgres:postgres@localhost:5432/chronosched?sslmode=disable"
+      }
+    }
+  ]
+}

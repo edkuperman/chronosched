@@ -1,0 +1,127 @@
+openapi: 3.0.3
+info:
+  title: Chronosched API
+  version: 2.0.0
+servers:
+  - url: http://localhost:8080
+paths:
+  /healthz:
+    get:
+      summary: Liveness probe
+      responses:
+        '200': { description: OK }
+  /dags:
+    post:
+      summary: Create DAG
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id, namespace, name]
+              properties:
+                id: { type: string, format: uuid }
+                namespace: { type: string }
+                name: { type: string }
+      responses:
+        '201': { description: Created }
+  /dags/{dagId}:
+    delete:
+      summary: Delete a DAG preserving shared jobs
+      parameters:
+        - in: path
+          name: dagId
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204': { description: Deleted }
+  /definitions:
+    post:
+      summary: Create immutable job definition
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [namespace, name, version, kind, payload_template]
+              properties:
+                namespace: { type: string }
+                name: { type: string }
+                version: { type: integer }
+                kind: { type: string, enum: [cmd, http, binary] }
+                payload_template: { type: object }
+      responses:
+        '201': { description: Created }
+  /dags/{dagId}/jobs:
+    post:
+      summary: Add job to DAG
+      parameters:
+        - in: path
+          name: dagId
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [def_id]
+              properties:
+                def_id: { type: string, format: uuid }
+                priority: { type: integer, default: 0 }
+                due_at: { type: string, format: date-time }
+                payload_json: { type: object }
+      responses:
+        '200': { description: OK }
+  /dags/{dagId}/dependencies:
+    post:
+      summary: Add dependency with cycle prevention
+      parameters:
+        - in: path
+          name: dagId
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [parent_job_id, child_job_id]
+              properties:
+                parent_job_id: { type: integer }
+                child_job_id: { type: integer }
+      responses:
+        '201': { description: Created }
+        '409': { description: Cycle detected }
+  /jobs/{jobId}/complete:
+    post:
+      summary: Mark job succeeded
+      parameters:
+        - in: path
+          name: jobId
+          required: true
+          schema: { type: integer }
+      responses:
+        '204': { description: Completed }
+  /jobs/{jobId}/fail:
+    post:
+      summary: Mark job failed
+      parameters:
+        - in: path
+          name: jobId
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                error: { type: string }
+      responses:
+        '204': { description: Failed }

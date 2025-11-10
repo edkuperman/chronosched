@@ -1,0 +1,3 @@
+# Chronosched Python client dependencies
+requests>=2.31.0,<3.0.0
+uuid-utils>=0.8.0 ; python_version >= "3.7"
