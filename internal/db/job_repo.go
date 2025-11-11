@@ -61,7 +61,6 @@ func (r *JobRepo) AddJob(ctx context.Context, dagID, defID string, priority int,
 	return id, err
 }
 
-
 func (r *JobRepo) AddDependency(ctx context.Context, dagID string, parentID, childID int64) error {
 	if parentID == childID {
 		return fmt.Errorf("cannot add self-dependency for job %d", parentID)
@@ -78,30 +77,35 @@ func (r *JobRepo) AddDependency(ctx context.Context, dagID string, parentID, chi
 	}
 	defer rows.Close()
 
-	// Build a string-keyed adjacency list for cycle detection
-	graph := map[string][]string{}
+	// Build in-memory edge list
+	var edges []dag.Edge
 	for rows.Next() {
 		var p, c int64
 		if err := rows.Scan(&p, &c); err != nil {
 			return err
 		}
-		ps, cs := fmt.Sprint(p), fmt.Sprint(c)
-		graph[ps] = append(graph[ps], cs)
+		edges = append(edges, dag.Edge{Src: fmt.Sprint(p), Dst: fmt.Sprint(c)})
 	}
 	if err := rows.Err(); err != nil {
 		return err
 	}
 
-	// Add the new edge to the graph
-	pKey, cKey := fmt.Sprint(parentID), fmt.Sprint(childID)
-	graph[pKey] = append(graph[pKey], cKey)
+	// Add new proposed edge
+	edges = append(edges, dag.Edge{
+		Src: fmt.Sprint(parentID),
+		Dst: fmt.Sprint(childID),
+	})
 
-	// Run local cycle detection
-	if cycle, hasCycle := dag.DetectCycleLocal(graph); hasCycle {
-		return fmt.Errorf("local cycle detected: %v", cycle)
+	detector := dag.DFSDetector{}
+	cycles, err := detector.DetectCycles(ctx, dag.EdgeCache(edges), dagID)
+	if err != nil {
+		return fmt.Errorf("cycle check failed: %w", err)
+	}
+	if len(cycles) > 0 {
+		return fmt.Errorf("cycle detected: %v", cycles)
 	}
 
-	// No cycle. Insert dependency
+	// No cycle - insert edge
 	_, err = r.DB.Exec(ctx, `
 		INSERT INTO job_dependencies(dag_id, parent_job_id, child_job_id)
 		VALUES ($1, $2, $3)
@@ -110,7 +114,6 @@ func (r *JobRepo) AddDependency(ctx context.Context, dagID string, parentID, chi
 	if err != nil {
 		return fmt.Errorf("failed to insert dependency: %w", err)
 	}
-
 	return nil
 }
 
@@ -166,3 +169,4 @@ func (r *JobRepo) LoadBinary(ctx context.Context, jobID int64) ([]byte, error) {
 	}
 	return bin, nil
 }
+

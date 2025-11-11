@@ -1,127 +1,516 @@
-openapi: 3.0.3
+openapi: 3.1.0
 info:
   title: Chronosched API
-  version: 2.0.0
+  version: 3.0.0
 servers:
   - url: http://localhost:8080
 paths:
   /healthz:
     get:
-      summary: Liveness probe
+      summary: Health check endpoint
       responses:
-        '200': { description: OK }
-  /dags:
+        "200":
+          description: Service is healthy
+
+  /namespaces:
+    get:
+      summary: List all namespaces
+      responses:
+        "200":
+          description: List of namespaces
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: string
     post:
-      summary: Create DAG
+      summary: Create a new namespace
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [id, namespace, name]
+              required: [name]
               properties:
-                id: { type: string, format: uuid }
-                namespace: { type: string }
                 name: { type: string }
       responses:
-        '201': { description: Created }
-  /dags/{dagId}:
+        "201":
+          description: Namespace created
+
+  /namespace/{name}:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      summary: Get namespace by name
+      responses:
+        "200":
+          description: Namespace info
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+                  name: { type: string }
+    put:
+      summary: Rename namespace
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [new_name]
+              properties:
+                new_name: { type: string }
+      responses:
+        "200":
+          description: Renamed
     delete:
-      summary: Delete a DAG preserving shared jobs
-      parameters:
-        - in: path
-          name: dagId
-          required: true
-          schema: { type: string, format: uuid }
+      summary: Delete namespace
       responses:
-        '204': { description: Deleted }
-  /definitions:
+        "204":
+          description: Deleted
+
+  /dags/{namespace_id}:
+    parameters:
+      - name: namespace_id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      summary: List DAGs in a namespace
+      responses:
+        "200":
+          description: List of DAGs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DagListItem"
+    put:
+      summary: Bulk upsert DAGs (idempotent)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                $ref: "#/components/schemas/DagCreate"
+      responses:
+        "200":
+          description: DAGs synced
     post:
-      summary: Create immutable job definition
+      summary: Create DAGs (error if exists)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                $ref: "#/components/schemas/DagCreate"
+      responses:
+        "201":
+          description: DAGs created
+        "409":
+          description: Conflict — DAG already exists
+
+  /dags/{namespace_id}/{id}:
+    parameters:
+      - name: namespace_id
+        in: path
+        required: true
+        schema: { type: string }
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      summary: Get DAG by ID
+      responses:
+        "200":
+          description: DAG details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Dag"
+    put:
+      summary: Update DAG metadata
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [namespace, name, version, kind, payload_template]
+              required: [name]
               properties:
-                namespace: { type: string }
                 name: { type: string }
-                version: { type: integer }
-                kind: { type: string, enum: [cmd, http, binary] }
-                payload_template: { type: object }
       responses:
-        '201': { description: Created }
-  /dags/{dagId}/jobs:
-    post:
-      summary: Add job to DAG
-      parameters:
-        - in: path
-          name: dagId
-          required: true
-          schema: { type: string, format: uuid }
+        "200":
+          description: Updated
+    delete:
+      summary: Delete DAG
+      responses:
+        "204":
+          description: Deleted
+
+  /definitions/{namespace_id}:
+    parameters:
+      - name: namespace_id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      summary: List job definitions
+      responses:
+        "200":
+          description: List of job definitions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/JobDefinitionListItem"
+    put:
+      summary: Bulk upsert job definitions
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              type: object
-              required: [def_id]
-              properties:
-                def_id: { type: string, format: uuid }
-                priority: { type: integer, default: 0 }
-                due_at: { type: string, format: date-time }
-                payload_json: { type: object }
+              type: array
+              items:
+                $ref: "#/components/schemas/JobDefinitionCreate"
       responses:
-        '200': { description: OK }
-  /dags/{dagId}/dependencies:
+        "200":
+          description: Synchronized
     post:
-      summary: Add dependency with cycle prevention
-      parameters:
-        - in: path
-          name: dagId
-          required: true
-          schema: { type: string, format: uuid }
+      summary: Create new job definitions
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              type: object
-              required: [parent_job_id, child_job_id]
-              properties:
-                parent_job_id: { type: integer }
-                child_job_id: { type: integer }
+              type: array
+              items:
+                $ref: "#/components/schemas/JobDefinitionCreate"
       responses:
-        '201': { description: Created }
-        '409': { description: Cycle detected }
-  /jobs/{jobId}/complete:
+        "201":
+          description: Created
+        "409":
+          description: Conflict — definition exists
+
+  /definitions/{namespace_id}/{id}:
+    parameters:
+      - name: namespace_id
+        in: path
+        required: true
+        schema: { type: string }
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      summary: Get job definition by ID
+      responses:
+        "200":
+          description: Job definition
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobDefinition"
+    put:
+      summary: Update job definition
+      responses:
+        "400":
+          description: Definitions are immutable; create a new version via POST
     post:
-      summary: Mark job succeeded
+      summary: Create new version of definition
+      responses:
+        "501":
+          description: Not implemented
+
+  /dags/{namespace_id}/{dagId}/jobs:
+    parameters:
+      - name: namespace_id
+        in: path
+        required: true
+        schema: { type: string }
+      - name: dagId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      summary: List jobs in DAG
+      responses:
+        "200":
+          description: List of jobs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/JobListItem"
+    put:
+      summary: Bulk upsert jobs in DAG
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                $ref: "#/components/schemas/JobCreate"
+      responses:
+        "200":
+          description: Jobs synced
+    post:
+      summary: Create jobs (strict)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                $ref: "#/components/schemas/JobCreate"
+      responses:
+        "201":
+          description: Jobs created
+        "409":
+          description: Job already exists
+
+  /dags/{namespace_id}/{dagId}/jobs/{id}:
+    parameters:
+      - name: namespace_id
+        in: path
+        required: true
+        schema: { type: string }
+      - name: dagId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+      - name: id
+        in: path
+        required: true
+        schema: { type: integer }
+    get:
+      summary: Get job details
+      responses:
+        "200":
+          description: Job details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+    put:
+      summary: Update job metadata
+      responses:
+        "501":
+          description: Not implemented
+    delete:
+      summary: Delete job
+      responses:
+        "501":
+          description: Not implemented
+
+  /dags/{namespace_id}/{dagId}/dependencies:
+    parameters:
+      - name: namespace_id
+        in: path
+        required: true
+        schema: { type: string }
+      - name: dagId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      summary: List dependencies
+      responses:
+        "200":
+          description: List of dependencies
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DependencyListItem"
+    put:
+      summary: Bulk upsert dependencies (local cycle checked)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                $ref: "#/components/schemas/DependencyCreate"
+      responses:
+        "200":
+          description: Dependencies synced
+    post:
+      summary: Create dependencies (error if exists)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                $ref: "#/components/schemas/DependencyCreate"
+      responses:
+        "201":
+          description: Created
+        "409":
+          description: Conflict — dependency exists
+
+  /jobs/{namespace_id}/{jobId}/complete:
+    post:
+      summary: Mark job as completed
+      description: Updates job status to succeeded and evaluates dependents.
       parameters:
-        - in: path
-          name: jobId
+        - name: namespace_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: jobId
+          in: path
           required: true
           schema: { type: integer }
       responses:
-        '204': { description: Completed }
-  /jobs/{jobId}/fail:
+        "200":
+          description: Job marked complete
+
+  /jobs/{namespace_id}/{jobId}/fail:
     post:
-      summary: Mark job failed
+      summary: Mark job as failed
+      description: Updates job status to failed and prevents dependents from running.
       parameters:
-        - in: path
-          name: jobId
+        - name: namespace_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: jobId
+          in: path
           required: true
           schema: { type: integer }
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                error: { type: string }
       responses:
-        '204': { description: Failed }
+        "200":
+          description: Job marked failed
+
+  /admin/check/global-cycles:
+    get:
+      summary: Run global cycle detection across all DAGs
+      responses:
+        "200":
+          description: Global cycle report
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  count: { type: integer }
+                  cycles:
+                    type: array
+                    items:
+                      type: array
+                      items: { type: string }
+
+components:
+  schemas:
+    DagListItem:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+
+    Dag:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        namespace: { type: string }
+        name: { type: string }
+        created_at: { type: string, format: date-time }
+
+    DagCreate:
+      type: object
+      required: [id, name]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+
+    JobDefinitionListItem:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        version: { type: integer }
+        kind: { type: string }
+
+    JobDefinition:
+      type: object
+      properties:
+        id: { type: string }
+        namespace: { type: string }
+        name: { type: string }
+        version: { type: integer }
+        kind: { type: string }
+        payload_template: { type: object }
+        created_at: { type: string, format: date-time }
+
+    JobDefinitionCreate:
+      type: object
+      required: [name, kind, payload_template]
+      properties:
+        name: { type: string }
+        version: { type: integer }
+        kind: { type: string }
+        payload_template: { type: object }
+
+    JobListItem:
+      type: object
+      properties:
+        id: { type: integer }
+        def_id: { type: string }
+        status:
+          type: string
+          enum: [queued, running, succeeded, failed, cancelled]
+
+    Job:
+      type: object
+      properties:
+        id: { type: integer }
+        def_id: { type: string }
+        dag_id: { type: string, format: uuid }
+        status:
+          type: string
+          enum: [queued, running, succeeded, failed, cancelled]
+        kind: { type: string }
+        payload: {}
+
+    JobCreate:
+      type: object
+      required: [def_id]
+      properties:
+        def_id: { type: string }
+
+    DependencyListItem:
+      type: object
+      properties:
+        parent_job_id: { type: integer }
+        child_job_id: { type: integer }
+
+    DependencyCreate:
+      type: object
+      required: [parent_job_id, child_job_id]
+      properties:
+        parent_job_id: { type: integer }
+        child_job_id: { type: integer }

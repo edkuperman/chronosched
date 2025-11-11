@@ -1,10 +1,12 @@
-
--- 001_init.sql
+-- 002_init.sql
+-- Chronosched schema initialization
+-- Includes cron_spec for periodic definitions and delay_interval for delayed triggers
 
 DO $$ BEGIN
   CREATE TYPE job_status AS ENUM ('queued','running','succeeded','failed','cancelled');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
+-- Root DAG metadata
 CREATE TABLE IF NOT EXISTS dags (
   id UUID PRIMARY KEY,
   namespace  TEXT NOT NULL,
@@ -13,6 +15,7 @@ CREATE TABLE IF NOT EXISTS dags (
   UNIQUE(namespace, name)
 );
 
+-- Immutable job definitions (templates)
 CREATE TABLE IF NOT EXISTS job_definitions (
   def_id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   namespace         TEXT NOT NULL,
@@ -20,10 +23,19 @@ CREATE TABLE IF NOT EXISTS job_definitions (
   version           INT  NOT NULL DEFAULT 1,
   kind              TEXT NOT NULL,
   payload_template  JSONB NOT NULL,
+
+  -- Optional CRON expression for periodic scheduling (e.g. '0 * * * *' or '@every 10m')
+  cron_spec         TEXT,
+
+  -- Optional delay interval for dependency-triggered jobs (e.g. '5 minutes', '1 hour')
+  -- This delay is applied after all parent jobs have succeeded.
+  delay_interval    INTERVAL,
+
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE(namespace, name, version)
 );
 
+-- Prevent updates to definitions (immutability)
 CREATE OR REPLACE FUNCTION prevent_jobdef_update()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -35,6 +47,7 @@ CREATE TRIGGER trg_prevent_jobdef_update
 BEFORE UPDATE ON job_definitions
 FOR EACH ROW EXECUTE FUNCTION prevent_jobdef_update();
 
+-- Concrete job instances
 CREATE TABLE IF NOT EXISTS jobs (
   id           BIGSERIAL PRIMARY KEY,
   dag_id       UUID NOT NULL REFERENCES dags(id) ON DELETE CASCADE,
@@ -53,6 +66,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   UNIQUE(dag_id, def_id)
 );
 
+-- Directed edges between jobs
 CREATE TABLE IF NOT EXISTS job_dependencies (
   dag_id        UUID NOT NULL,
   parent_job_id BIGINT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
@@ -61,6 +75,7 @@ CREATE TABLE IF NOT EXISTS job_dependencies (
   CHECK (parent_job_id <> child_job_id)
 );
 
+-- Transitive closure for reachability (used for cycle detection)
 CREATE TABLE IF NOT EXISTS job_closure (
   dag_id        UUID NOT NULL,
   ancestor_id   BIGINT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
@@ -69,6 +84,7 @@ CREATE TABLE IF NOT EXISTS job_closure (
   PRIMARY KEY (dag_id, ancestor_id, descendant_id)
 );
 
+-- Frontier tracking for DAG scheduling (in-degree / readiness)
 CREATE TABLE IF NOT EXISTS job_frontier (
   dag_id    UUID NOT NULL,
   job_id    BIGINT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
@@ -76,6 +92,7 @@ CREATE TABLE IF NOT EXISTS job_frontier (
   ready     BOOLEAN NOT NULL DEFAULT FALSE
 );
 
+-- Ensure new edges don't introduce cycles
 CREATE OR REPLACE FUNCTION enforce_acyclic_closure()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -123,6 +140,7 @@ CREATE TRIGGER trg_dep_closure
 BEFORE INSERT ON job_dependencies
 FOR EACH ROW EXECUTE FUNCTION enforce_acyclic_closure();
 
+-- Initialize frontier records for new jobs
 CREATE OR REPLACE FUNCTION init_frontier_for_job(p_job_id BIGINT, p_dag UUID)
 RETURNS VOID AS $$
 BEGIN
@@ -133,6 +151,7 @@ BEGIN
   ON CONFLICT (job_id) DO NOTHING;
 END; $$ LANGUAGE plpgsql;
 
+-- Keep frontier in sync when dependencies change
 CREATE OR REPLACE FUNCTION update_frontier_on_dependency()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -152,10 +171,12 @@ CREATE TRIGGER trg_dep_frontier
 AFTER INSERT OR DELETE ON job_dependencies
 FOR EACH ROW EXECUTE FUNCTION update_frontier_on_dependency();
 
+-- When a job succeeds, propagate readiness to its children
 CREATE OR REPLACE FUNCTION on_job_succeeded_make_children_ready()
 RETURNS TRIGGER AS $$
 BEGIN
   IF NEW.status = 'succeeded' AND OLD.status <> 'succeeded' THEN
+    -- 1. Update frontier: mark children closer to readiness
     UPDATE job_frontier f
     SET in_degree = f.in_degree - 1,
         ready = (f.in_degree - 1) = 0
@@ -164,21 +185,32 @@ BEGIN
       WHERE dag_id = NEW.dag_id AND parent_job_id = NEW.id
     );
 
+    -- 2. Update due_at for each child job, honoring its definition’s delay_interval
     UPDATE jobs j
-    SET due_at = GREATEST(j.due_at, now())
-    WHERE j.id IN (
-      SELECT child_job_id FROM job_dependencies
-      WHERE dag_id = NEW.dag_id AND parent_job_id = NEW.id
-    );
+    SET due_at = GREATEST(
+      j.due_at,
+      now() + COALESCE(d.delay_interval, INTERVAL '0 seconds')
+    )
+    FROM job_definitions d
+    WHERE j.def_id = d.def_id
+      AND j.id IN (
+        SELECT child_job_id
+        FROM job_dependencies
+        WHERE dag_id = NEW.dag_id AND parent_job_id = NEW.id
+      );
   END IF;
+
   RETURN NEW;
-END; $$ LANGUAGE plpgsql;
+END;
+$$ LANGUAGE plpgsql;
 
 DROP TRIGGER IF EXISTS trg_job_succeeded_children ON jobs;
 CREATE TRIGGER trg_job_succeeded_children
 AFTER UPDATE OF status ON jobs
-FOR EACH ROW EXECUTE FUNCTION on_job_succeeded_make_children_ready();
+FOR EACH ROW
+EXECUTE FUNCTION on_job_succeeded_make_children_ready();
 
+-- DAG deletion helper: cleans up only jobs unique to that DAG
 CREATE OR REPLACE PROCEDURE delete_dag_preserve_shared(p_dag UUID)
 LANGUAGE plpgsql AS $$
 BEGIN
