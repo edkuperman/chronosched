@@ -1,6 +1,5 @@
 -- 002_init.sql
 -- Chronosched schema initialization
--- Includes cron_spec for periodic definitions and delay_interval for delayed triggers
 
 DO $$ BEGIN
   CREATE TYPE job_status AS ENUM ('queued','running','succeeded','failed','cancelled');

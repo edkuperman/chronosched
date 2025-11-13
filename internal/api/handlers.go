@@ -54,10 +54,9 @@ func (h *Handlers) listNamespaces(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handlers) createNamespace(w http.ResponseWriter, r *http.Request) {
-	type req struct {
+	var body struct {
 		Name string `json:"name"`
 	}
-	var body req
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, 400, err)
 		return
@@ -66,15 +65,21 @@ func (h *Handlers) createNamespace(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, fmt.Errorf("name required"))
 		return
 	}
+
 	nsRepo := h.ns
 	if nsRepo == nil {
 		nsRepo = db.NewNamespaceRepo(h.db)
 	}
-	if err := nsRepo.Create(r.Context(), body.Name); err != nil {
+	id, err := nsRepo.Create(r.Context(), body.Name)
+	if err != nil {
 		writeErr(w, 500, err)
 		return
 	}
-	writeJSON(w, 201, map[string]any{"name": body.Name})
+
+	writeJSON(w, 201, map[string]any{
+		"namespace_id": id,
+		"name":         body.Name,
+	})
 }
 
 func (h *Handlers) getNamespace(w http.ResponseWriter, r *http.Request) {

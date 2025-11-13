@@ -4,14 +4,15 @@ import (
 	"context"
 	"log"
 
-	"github.com/edkuperman/chronosched/internal/db"
 	"github.com/robfig/cron/v3"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/edkuperman/chronosched/internal/db"
 )
 
 type Scheduler struct {
 	jobRepo *db.JobRepo
-	dbPool  *pgxpool.Pool // replace with pgxpool.Pool or your wrapper
+	dbPool  *pgxpool.Pool
 	cron    *cron.Cron
 }
 
@@ -23,14 +24,12 @@ func New(jobRepo *db.JobRepo, pool *pgxpool.Pool) *Scheduler {
 	}
 }
 
-// Load all jobs that have cron_spec and register them
-// Load all job definitions that have a cron_spec and register them
+// LoadAndRegister registers all job definitions that have a cron_spec set.
 func (s *Scheduler) LoadAndRegister(ctx context.Context) error {
 	rows, err := s.dbPool.Query(ctx, `
 		SELECT def_id, cron_spec
 		FROM job_definitions
-		WHERE cron_spec IS NOT NULL;
-	`)
+		WHERE cron_spec IS NOT NULL`)
 	if err != nil {
 		return err
 	}
@@ -41,33 +40,27 @@ func (s *Scheduler) LoadAndRegister(ctx context.Context) error {
 		if err := rows.Scan(&defID, &spec); err != nil {
 			return err
 		}
-
 		def := defID
 		log.Printf("[scheduler] registering definition %s (cron=%s)", def, spec)
-
-		// Register CRON callback that enqueues a new job run from this definition
-		s.cron.AddFunc(spec, func() {
-			s.Tick(ctx, 0, def)
+		_, err := s.cron.AddFunc(spec, func() {
+			s.Tick(ctx, def)
 		})
+		if err != nil {
+			return err
+		}
 	}
-
-	return nil
+	return rows.Err()
 }
 
-// Tick() executes when a job's cron fires
-func (s *Scheduler) Tick(ctx context.Context, jobID int64, defID string) {
-	log.Printf("[scheduler] tick job=%d def=%s", jobID, defID)
-
-	// Each tick creates a new run instance
-	newJobID, err := s.jobRepo.AddJob(ctx, "", defID, 0, nil, "{}")
+// Tick fires on cron tick for a definition and enqueues a new run.
+func (s *Scheduler) Tick(ctx context.Context, defID string) {
+	_, err := s.jobRepo.AddJob(ctx, "", defID, 0, nil, "{}") // dag-less periodic run
 	if err != nil {
-		log.Printf("[scheduler] failed to enqueue new run for job=%d: %v", jobID, err)
+		log.Printf("[scheduler] failed to enqueue new run for def=%s: %v", defID, err)
 		return
 	}
-
-	log.Printf("[scheduler] spawned new run %d for job=%d def=%s", newJobID, jobID, defID)
+	log.Printf("[scheduler] enqueued run for def=%s", defID)
 }
 
-// Start/Stop
 func (s *Scheduler) Start() { s.cron.Start() }
 func (s *Scheduler) Stop()  { <-s.cron.Stop().Done() }

@@ -26,13 +26,20 @@ func (r *NamespaceRepo) ensureTable(ctx context.Context) error {
 }
 
 // Create adds a namespace
-func (r *NamespaceRepo) Create(ctx context.Context, name string) error {
+func (r *NamespaceRepo) Create(ctx context.Context, name string) (string, error) {
 	if err := r.ensureTable(ctx); err != nil {
-		return err
+		return "", err
 	}
-	_, err := r.DB.Exec(ctx, `INSERT INTO namespaces(name) VALUES($1) ON CONFLICT DO NOTHING;`, name)
-	return err
+	var id string
+	err := r.DB.QueryRow(ctx, `
+		INSERT INTO namespaces(name)
+		VALUES($1)
+		ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
+		RETURNING namespace_id;
+	`, name).Scan(&id)
+	return id, err
 }
+
 
 // List returns union of all namespaces
 func (r *NamespaceRepo) List(ctx context.Context) ([]string, error) {

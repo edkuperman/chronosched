@@ -13,31 +13,26 @@ import (
 	"github.com/edkuperman/chronosched/internal/db"
 )
 
+// Runner executes jobs in parallel, periodically polling the database for ready jobs.
 type Runner struct {
-	// Dependencies
 	DB     *pgxpool.Pool
-	Sched  *db.SchedulerRepo
 	Jobs   *db.JobRepo
-
-	// Identity
 	WorkerID string
 
-	// Tuning
-	PollEvery      time.Duration // how often to call FairDequeue
-	MaxBatch       int           // max jobs per FairDequeue call
-	Concurrency    int           // max parallel jobs in this process
-	LeaseDuration  time.Duration // lease length on claim
-	HeartbeatEvery time.Duration // how often to extend leases for running jobs
+	// tuning parameters
+	PollEvery      time.Duration // how often to call DequeueReady
+	MaxBatch       int           // max jobs dequeued per poll
+	Concurrency    int           // max concurrent workers
+	LeaseDuration  time.Duration // job lease time
+	HeartbeatEvery time.Duration // lease renewal frequency
 
-	// Internal
+	// internal
 	muRunning sync.Mutex
-	running   map[int64]struct{} // in-flight job ids, for heartbeat
+	running   map[int64]struct{}
 }
 
+// Run launches the polling loop and worker goroutines.
 func (r *Runner) Run(ctx context.Context) error {
-	if r.Sched == nil {
-		r.Sched = db.NewSchedulerRepo(r.DB)
-	}
 	if r.Jobs == nil {
 		r.Jobs = db.NewJobRepo(r.DB)
 	}
@@ -63,57 +58,51 @@ func (r *Runner) Run(ctx context.Context) error {
 	log.Printf("[worker %s] starting (poll=%s, batch=%d, conc=%d, lease=%s)",
 		r.WorkerID, r.PollEvery, r.MaxBatch, r.Concurrency, r.LeaseDuration)
 
-	jobsCh := make(chan int64)
+	jobsCh := make(chan db.Job)
 	resultsCh := make(chan result)
 	sem := make(chan struct{}, r.Concurrency)
-
 	r.running = make(map[int64]struct{})
 
-	// 1) Poller: FairDequeue -> jobsCh
+	// 1. Poller: periodically fetch ready jobs
 	pollCtx, pollCancel := context.WithCancel(ctx)
 	go r.poller(pollCtx, jobsCh)
 
-	// 2) Heartbeater: extends leases for in-flight jobs
+	// 2. Heartbeater: periodically renew leases for running jobs
 	hbCtx, hbCancel := context.WithCancel(ctx)
 	go r.heartbeater(hbCtx)
 
-	// 3) Worker fan-out
+	// 3. Worker fan-out
 	var wg sync.WaitGroup
-	workerLoopDone := make(chan struct{})
 	go func() {
-		defer close(workerLoopDone)
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case id, ok := <-jobsCh:
+			case j, ok := <-jobsCh:
 				if !ok {
 					return
 				}
 				sem <- struct{}{}
 				wg.Add(1)
-				r.trackStart(id)
-				go func(jobID int64) {
+				r.trackStart(j.ID)
+				go func(job db.Job) {
 					defer wg.Done()
 					defer func() { <-sem }()
-					defer r.trackEnd(jobID)
+					defer r.trackEnd(job.ID)
 
-					// Replace with actual execution for jobID (dispatch by kind if needed)
-					if err := r.execute(ctx, jobID); err != nil {
-						log.Printf("[worker %s] job %d FAILED: %v", r.WorkerID, jobID, err)
-						resultsCh <- result{jobID: jobID, err: err}
+					if err := r.execute(ctx, job); err != nil {
+						log.Printf("[worker %s] job %d FAILED: %v", r.WorkerID, job.ID, err)
+						resultsCh <- result{jobID: job.ID, err: err}
 						return
 					}
-					resultsCh <- result{jobID: jobID, err: nil}
-				}(id)
+					resultsCh <- result{jobID: job.ID, err: nil}
+				}(j)
 			}
 		}
 	}()
 
-	// 4) Results fan-in
-	resultsDone := make(chan struct{})
+	// 4. Results handler: update job status
 	go func() {
-		defer close(resultsDone)
 		for {
 			select {
 			case <-ctx.Done():
@@ -123,7 +112,6 @@ func (r *Runner) Run(ctx context.Context) error {
 					return
 				}
 				if res.err != nil {
-					// Mark fail + (optional) reschedule/backoff
 					_ = r.Jobs.MarkFail(ctx, res.jobID, res.err.Error())
 				} else {
 					_ = r.Jobs.MarkComplete(ctx, res.jobID)
@@ -132,50 +120,36 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 	}()
 
-	// === Shutdown path ===
+	// === Shutdown ===
 	<-ctx.Done()
 	log.Printf("[worker %s] shutting down...", r.WorkerID)
-
-	// stop poller and heartbeater
 	pollCancel()
 	hbCancel()
-
-	// stop accepting new jobs
 	close(jobsCh)
-
-	// wait for active goroutines to finish
 	wg.Wait()
 	close(resultsCh)
-
-	<-resultsDone
-	<-workerLoopDone
-
 	log.Printf("[worker %s] stopped", r.WorkerID)
 	return nil
 }
 
-type result struct {
-	jobID int64
-	err   error
-}
+// poller periodically fetches ready jobs.
+func (r *Runner) poller(ctx context.Context, jobsCh chan<- db.Job) {
+	ticker := time.NewTicker(r.PollEvery)
+	defer ticker.Stop()
 
-// poller periodically calls FairDequeue and pushes job IDs to jobsCh.
-func (r *Runner) poller(ctx context.Context, jobsCh chan<- int64) {
-	t := time.NewTicker(r.PollEvery)
-	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-t.C:
-			ids, err := r.Sched.FairDequeue(ctx, r.MaxBatch, r.WorkerID, r.LeaseDuration)
+		case <-ticker.C:
+			jobs, err := r.Jobs.DequeueReady(ctx, r.MaxBatch, r.WorkerID, r.LeaseDuration)
 			if err != nil {
-				log.Printf("[worker %s] FairDequeue error: %v", r.WorkerID, err)
+				log.Printf("[worker %s] DequeueReady error: %v", r.WorkerID, err)
 				continue
 			}
-			for _, id := range ids {
+			for _, j := range jobs {
 				select {
-				case jobsCh <- id:
+				case jobsCh <- j:
 				case <-ctx.Done():
 					return
 				}
@@ -184,7 +158,7 @@ func (r *Runner) poller(ctx context.Context, jobsCh chan<- int64) {
 	}
 }
 
-// heartbeater extends leases for all currently running jobs.
+// heartbeater extends leases for in-flight jobs.
 func (r *Runner) heartbeater(ctx context.Context) {
 	t := time.NewTicker(r.HeartbeatEvery)
 	defer t.Stop()
@@ -197,14 +171,13 @@ func (r *Runner) heartbeater(ctx context.Context) {
 			if len(ids) == 0 {
 				continue
 			}
-			// Direct SQL heartbeat to avoid extra repo surfacing; feel free to move into JobRepo.
 			_, err := r.DB.Exec(ctx, `
 				UPDATE jobs
-				SET heartbeat_at = now(),
-				    lease_until   = now() + $2::interval
-				WHERE id = ANY($1)
-				  AND status = 'running'
-				  AND lease_owner = $3
+				   SET heartbeat_at = now(),
+				       lease_until = now() + $2::interval
+				 WHERE id = ANY($1)
+				   AND status = 'running'
+				   AND lease_owner = $3;
 			`, ids, r.LeaseDuration.String(), r.WorkerID)
 			if err != nil {
 				log.Printf("[worker %s] heartbeat error: %v", r.WorkerID, err)
@@ -213,6 +186,19 @@ func (r *Runner) heartbeater(ctx context.Context) {
 	}
 }
 
+// execute dispatches job execution based on its Kind.
+func (r *Runner) execute(ctx context.Context, j db.Job) error {
+	switch j.Kind {
+	case "http":
+		return r.execHTTP(ctx, j)
+	case "binary":
+		return r.execBinary(ctx, j)
+	default:
+		return fmt.Errorf("unknown job kind: %s", j.Kind)
+	}
+}
+
+// internal tracking helpers
 func (r *Runner) trackStart(id int64) {
 	r.muRunning.Lock()
 	r.running[id] = struct{}{}
@@ -233,29 +219,15 @@ func (r *Runner) snapshotRunning() []int64 {
 	return out
 }
 
-func (r *Runner) execute(ctx context.Context, jobID int64) error {
-	j, err := r.Jobs.Load(ctx, jobID)
-	if err != nil {
-		return fmt.Errorf("load job %d: %w", jobID, err)
-	}
-
-	switch j.Kind {
-	case "http":
-		return r.execHTTP(ctx, j)
-	case "cmd":
-		return r.execCommand(ctx, j)
-	case "binary":
-		return r.execBinary(ctx, j)
-	default:
-		return fmt.Errorf("unknown job kind: %s", j.Kind)
-	}
+type result struct {
+	jobID int64
+	err   error
 }
 
 func defaultWorkerID() string {
-    if id := os.Getenv("WORKER_ID"); id != "" {
-        return id
-    }
-    h, _ := os.Hostname()
-    return fmt.Sprintf("%s-%d", h, os.Getpid())
+	if id := os.Getenv("WORKER_ID"); id != "" {
+		return id
+	}
+	h, _ := os.Hostname()
+	return fmt.Sprintf("%s-%d", h, os.Getpid())
 }
-

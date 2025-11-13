@@ -1,5 +1,5 @@
 
--- 002_seed_wait_jobs.sql
+-- 004_seed_wait_jobs.sql
 
 DELETE FROM job_definitions
 WHERE namespace = 'core' AND name IN ('Wait','Wait5s','Wait10s','Wait5m','Wait1h');

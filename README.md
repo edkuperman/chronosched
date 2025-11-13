@@ -1,193 +1,246 @@
-# 🕒 Chronosched — Distributed DAG-Aware Job Scheduler
+# Chronosched
 
-Chronosched is a lightweight, distributed job scheduler designed around **directed acyclic graphs (DAGs)**.  
-It manages job definitions, dependencies, and execution order with strong guarantees against cycles — enabling reliable orchestration of multi-step workflows.
-
----
-
-## Features
-
-- **DAG-based dependency management** — safely model and enforce job order.
-- **Local + global cycle detection** to prevent invalid edge insertions.
-- **PostgreSQL persistence** with transactional inserts and triggers.
-- **REST API** built with Go + Chi router and auto-generated Swagger UI.
-- **Containerized demo** (Postgres, API server, worker, Python client) via Docker Compose.
-- **Schema auto-migration** through `/docker-entrypoint-initdb.d` SQL scripts.
+Chronosched is a lightweight **distributed job scheduler** with **DAG-aware execution** and **PostgreSQL persistence**.  
+It supports both **dependency-driven workflows** and **time-based (cron) schedules**.
 
 ---
 
-## Architecture Overview
+## Overview
 
-| Component | Description |
-|------------|-------------|
-| **server** | REST API built in Go (manages DAGs, jobs, dependencies). |
-| **worker** | Background executor (simulated for demo). |
-| **db** | PostgreSQL 18 with schema initialized from `/migrate/initdb`. |
-| **demo** | Python client script (`demo_client.py`) that drives the end-to-end example. |
+Chronosched models all work as **jobs** and **job definitions**:
 
-**Key Entities**
-
-- **DAG** — a workflow namespace.
-- **Job Definition** — reusable template (e.g., a command or function).
-- **Job** — concrete instance of a definition within a DAG.
-- **Dependency** — directed edge enforcing `parent → child` ordering.
+| Concept | Description |
+|----------|--------------|
+| **Job Definition** | Immutable template describing *what* to run — including kind (`cmd`, `http`, `binary`), payload, and scheduling metadata (`cron_spec`, `delay_interval`). |
+| **Job** | An executable instance of a definition — typically inserted into a DAG (directed acyclic graph). |
+| **DAG** | A workflow graph connecting jobs by dependency (parent → child). DAG edges enforce that a child runs only after all its parents succeed. |
+| **Frontier** | Tracks readiness of jobs in each DAG based on their in-degree (unmet dependencies). |
+| **Scheduler** | Periodically registers all definitions with `cron_spec` and enqueues new job runs automatically. |
+| **Worker** | Dequeues ready jobs, executes them, renews leases, and marks them `succeeded` or `failed`. |
 
 ---
 
-## Setup and Usage
+## Scheduling Options
 
-### Prerequisites
-- Docker and Docker Compose (v2+)
-- (Optional) Python 3.10+ for running `demo_client.py`
+Chronosched supports three scheduling modes:
 
-### 1. Build and Start Chronosched
-From the project root:
+| Mode | Field(s) Used | Trigger | Example |
+|------|----------------|----------|----------|
+| **Time-driven** | `cron_spec` | Fires periodically (like a CRON daemon). | `'@every 5s'`, `'0 * * * *'` |
+| **Dependency-driven** | DAG edges (`parent → child`) | Runs after all parent jobs succeed. | `JobB` runs after `JobA` completes. |
+| **Delayed dependency** | `delay_interval` | Runs after parents succeed, offset by a delay. | Run 5 min after parent success. |
 
-```bash
-docker compose up -d --build
-```
-
-This will:
-- Start PostgreSQL (`chronosched-db`) and apply all migrations.
-- Start the Go API server (`chronosched-server`) and worker.
-- Expose:
-  - API on [http://localhost:8080](http://localhost:8080)
-  - Swagger UI at [http://localhost:8080/](http://localhost:8080/)
-
-To verify DB health:
-```bash
-docker compose ps
-docker compose exec db psql -U postgres -d chronosched -c '\d job_definitions'
-```
-
-You should see the `kind` column in the output.
+If a definition has:
+- a `cron_spec` → it’s **registered** by the scheduler loop and runs periodically.
+- no `cron_spec` → it’s **triggered** only when its parents succeed.
+- a `delay_interval` → its execution is deferred by that interval once ready.
 
 ---
 
-### 2. Run the Demo Client
-
-Run the included Python demo to exercise the full workflow:
-
-```bash
-docker compose run --rm demo
-```
-
-The demo performs:
-
-1. **Create a DAG**  
-2. **Register three job definitions** (`Wait`, `Wait5s`, `Wait10s`)  
-3. **Add three jobs** to the DAG  
-4. **Wire dependencies** (`Wait → Wait5s → Wait10s`)  
-5. **Simulate job completion**  
-6. **Query job details** back via REST
-
-You’ll see output like:
-
-```
-POST /dags -> 201
-POST /definitions -> 201
-POST /jobs -> 201
-POST /dependencies -> 201
-GET /jobs/1 -> 200
-{
-  "id": 1,
-  "kind": "cmd",
-  "payload": { "cmd": "echo running Wait" }
-}
-```
-
----
-
-## Directory Structure
+## Directory Layout
 
 ```
 chronosched/
 ├── cmd/
-│   ├── server/           # main.go for API server
-│   ├── worker/           # worker entrypoint
-│   └── demo_client.py    # Python demonstration script
+│   ├── server/     # API service
+│   ├── worker/     # Worker process
+│   └── demo/       # Example / quick-run entrypoints
 ├── internal/
-│   ├── api/              # Chi routers & HTTP handlers
-│   ├── db/               # PostgreSQL repositories (pgx)
-│   ├── dag/              # DAG utilities (cycle detection)
-│   └── queue/            # Job queue primitives
-├── migrate/
-│   └── initdb/           # SQL initialization scripts (executed by Postgres)
-│       ├── 000_create_db_if_not_exists.sql
-│       ├── 001_run_in_chronosched.sql
-│       ├── 002_init.sql
-│       └── 003_seed_wait_jobs.sql
-├── docker-compose.yml
+│   ├── api/        # HTTP handlers (chi router)
+│   ├── db/         # JobRepo, SchedulerRepo
+│   ├── scheduler/  # CRON scheduler registration
+│   └── worker/     # Runner, executors
+├── migrate/initdb/
+│   ├── 000_create_db_if_not_exists.sql
+│   ├── 001_switch_to_chronosched_db.sql
+│   ├── 002_schema.sql
+│   ├── 003_indexes.sql
+│   ├── 004_tuning.sql # tuning notes
+│   └── 005_seed_demo.sql # demo seed
+├── demo_client.py   # interactive demo script
 └── README.md
 ```
 
 ---
 
-## Development Notes
+## Running the Demo
 
-- Schema migrations are **idempotent** (`CREATE TABLE IF NOT EXISTS`).
-- Healthchecks ensure DB initializes fully before API startup.
-- Local cycle detection is performed in Go (`internal/dag/cycle_local.go`) when adding dependencies.
-- Each `AddDependency` runs a lightweight in-memory DAG validation before committing.
-
----
-
-## Example API Calls
+### Start services
 
 ```bash
-# Create a DAG
-curl -X POST http://localhost:8080/dags      -H "Content-Type: application/json"      -d '{"id":"demo-dag","namespace":"core","name":"daily_etl"}'
+docker compose up --build
+```
 
-# Create a job definition
-curl -X POST http://localhost:8080/definitions      -H "Content-Type: application/json"      -d '{"namespace":"core","name":"Wait","kind":"cmd","payloadTemplate":{"cmd":"echo Hello"}}'
+This launches:
+- PostgreSQL 18 with schema initialization.
+- The Chronosched API server at `http://localhost:8080`.
+- (Optionally) a worker service polling for jobs.
 
-# Add a job to the DAG
-curl -X POST http://localhost:8080/dags/demo-dag/jobs      -H "Content-Type: application/json"      -d '{"defId":"<def_uuid>","priority":1,"payload":{"cmd":"echo running"}}'
+---
+
+### Run the demo client
+
+```bash
+python demo_client.py
+```
+
+The script will:
+1. Create a new DAG.
+2. Define several jobs — both dependency-based and cron-based.
+3. Add dependencies (`Root → Child5s → Leaf`).
+4. Simulate parent completions to trigger children.
+5. Observe cron jobs firing every few seconds.
+
+The whole demo finishes in ~25 seconds.
+
+---
+
+## Example Output (trimmed)
+
+```
+Creating DAG 9a7f...  -> 201
+POST /definitions (Root, Child5s, Leaf, Every5s, Every10s)
+...
+Marking Root complete
+Marking Child5s complete
+Querying job Leaf -> ready
+Watching cron jobs fire for ~15 seconds...
+CRON_5S at 10:00:05
+CRON_10S at 10:00:10
 ```
 
 ---
 
-## Common Commands
+## Key Components
 
-| Task | Command |
-|------|----------|
-| Rebuild everything | `docker compose down -v && docker compose up --build` |
-| Run only server & worker | `docker compose up -d db server worker` |
-| Tail logs | `docker compose logs -f server` |
-| Access DB shell | `docker compose exec db psql -U postgres -d chronosched` |
-
----
-
-## Demo Completion
-
-After running `demo_client.py`, you’ll see:
-
-```
-GET /jobs/3 -> 200
-{
-  "id": 3,
-  "kind": "cmd",
-  "payload": { "cmd": "echo running Wait10s" }
-}
-Demo completed
-```
-
-This confirms:
-- Schema loaded properly.
-- Server handled all endpoints.
-- Worker and DB synchronization succeeded.
+| Component | Description |
+|------------|--------------|
+| **JobRepo.DequeueReady()** | Atomic job leasing (`FOR UPDATE SKIP LOCKED`) for concurrency-safe workers. |
+| **Trigger `on_job_succeeded_make_children_ready()`** | Automatically sets `due_at = now() + delay_interval` for children. |
+| **Runner** | Configurable worker (poll rate, concurrency, lease renewal). |
+| **Scheduler** | Registers CRON jobs (`cron_spec`) and enqueues runs. |
+| **Autovacuum tuning** | Keeps the `jobs` table healthy under high update volume. |
 
 ---
 
-## Author
+## API Endpoints
 
-**Edward Kuperman**  
-Principal Software Engineer • Distributed Systems & FinTech  
-GitHub: [@edkuperman](https://github.com/edkuperman)
+| Path                                          | Description                                                              
+| --------------------------------------------- | ------------------------------------------------------------------------ | 
+| `POST /api/v1/dags`                           | Create a new DAG                                                         |
+| `GET /api/v1/dags`                            | List all DAGs                                                            |
+| `GET /api/v1/dags/{dagId}`                    | Retrieve DAG details                                                     |
+| `DELETE /api/v1/dags/{dagId}`                 | Delete a DAG (preserving shared jobs)                                    |
+| `POST /api/v1/definitions/bulk`               | Bulk create or upsert job definitions                                    |
+| `POST /api/v1/definitions`                    | Create a single job definition (supports `cronSpec` and `delayInterval`) |
+| `GET /api/v1/definitions/{defId}`             | Fetch definition info                                                    |
+| `GET /api/v1/definitions`                     | List all job definitions (optionally by namespace)                       |
+| `POST /api/v1/dags/{dagId}/jobs`              | Add a job instance to a DAG                                              |
+| `GET /api/v1/dags/{dagId}/jobs`               | List all jobs in a DAG                                                   |
+| `GET /api/v1/jobs/{jobId}`                    | Retrieve job details                                                     |
+| `POST /api/v1/dags/{dagId}/dependencies/bulk` | Bulk insert dependencies into a DAG                                      |
+| `POST /api/v1/dags/{dagId}/dependencies`      | Add a single parent→child dependency                                     |
+| `GET /api/v1/dags/{dagId}/dependencies`       | List dependencies for a DAG                                              |
+| `POST /api/v1/jobs/{jobId}/complete`          | Mark job as **succeeded**                                                |
+| `POST /api/v1/jobs/{jobId}/fail`              | Mark job as **failed**                                                   |
+| `POST /api/v1/jobs/{jobId}/retry`             | Reset a failed job for re-execution (if implemented)                     |
+| `GET /api/v1/scheduler/reload`                | Force scheduler to reload all cron definitions                           |
+| `GET /api/v1/healthz`                         | Health check endpoint                                                    |
+
+---
+
+## Example: Delayed Dependency Job
+
+Chronosched also supports *delayed dependencies* — jobs that run after their parent(s) succeed, but only after a specified delay interval.
+
+Here’s how you’d define and connect one:
+
+```bash
+# 1️ Create a new namespace (if not already present)
+curl -X POST http://localhost:8080/api/v1/namespaces \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "demo",
+    "description": "Demo namespace"
+  }'
+
+# Expected response:
+# {
+#   "id": "NAMESPACE_ID_HERE",
+#   "name": "demo"
+# }
+
+# 2️ Retrieve the namespace ID
+# (If you didn’t store it from creation, you can look it up:)
+curl -X GET http://localhost:8080/api/v1/namespaces | jq .
+
+# Save the "id" field from the "demo" entry as NAMESPACE_ID.
+
+# 3️ Create a parent job definition
+curl -X POST http://localhost:8080/api/v1/namespaces/NAMESPACE_ID/definitions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "ParentJob",
+    "version": 1,
+    "kind": "cmd",
+    "payloadTemplate": {"cmd": "echo Parent && sleep 1 && echo Done Parent"}
+  }'
+
+# 4️ Create a child job definition with delay_interval
+curl -X POST http://localhost:8080/api/v1/namespaces/NAMESPACE_ID/definitions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "DelayedChild",
+    "version": 1,
+    "kind": "cmd",
+    "payloadTemplate": {"cmd": "echo Delayed Child && date"},
+    "delayInterval": "5 minutes"
+  }'
+
+# 5️ Create a DAG under the same namespace
+curl -X POST http://localhost:8080/api/v1/namespaces/NAMESPACE_ID/dags \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "delayed_run"
+  }'
+
+# Expected response: { "id": "DAG_ID_HERE", "namespaceId": "NAMESPACE_ID_HERE" }
+
+# 6️ Create job instances inside the DAG
+curl -X POST http://localhost:8080/api/v1/namespaces/NAMESPACE_ID/dags/DAG_ID_HERE/jobs \
+  -H "Content-Type: application/json" \
+  -d '{"defId": "DEF_ID_PARENT"}'
+
+curl -X POST http://localhost:8080/api/v1/namespaces/NAMESPACE_ID/dags/DAG_ID_HERE/jobs \
+  -H "Content-Type: application/json" \
+  -d '{"defId": "DEF_ID_CHILD"}'
+
+# 7️ Link the dependency (Parent → DelayedChild)
+curl -X POST http://localhost:8080/api/v1/namespaces/NAMESPACE_ID/dags/DAG_ID_HERE/dependencies \
+  -H "Content-Type: application/json" \
+  -d '{
+    "parentJobId": JOB_ID_PARENT,
+    "childJobId": JOB_ID_CHILD
+  }'
+
+# 8️ Complete the parent job
+curl -X POST http://localhost:8080/api/v1/namespaces/NAMESPACE_ID/jobs/JOB_ID_PARENT/complete
+
+# Result:
+# The child job will transition to 'queued' with due_at = now() + interval '5 minutes'
+# and will be picked up by workers automatically after the delay expires.
+
+```
+
+The trigger automatically applies:
+```sql
+due_at = now() + delay_interval
+```
+once the parent succeeds — no extra logic required.
 
 ---
 
 ## License
 
-MIT License © 2025 Edward Kuperman  
-See [`LICENSE`](LICENSE) for details.
+MIT © 2025 — Edward Kuperman  
+Open-source distributed scheduler with DAG orchestration.
