@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/google/uuid"
 )
 
 type Edge struct {
@@ -26,7 +27,11 @@ type DBEdges struct {
 }
 
 func (s *DBEdges) Edges(ctx context.Context, dagID string) ([]Edge, error) {
-	rows, err := s.DB.Query(ctx, `SELECT src, dst FROM dag_edges WHERE dag_id=$1`, dagID)
+	dagUUID, err := uuid.Parse(dagID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.DB.Query(ctx, `SELECT src, dst FROM dag_edges WHERE dag_id=$1`, dagUUID)
 	if err != nil {
 		return nil, err
 	}

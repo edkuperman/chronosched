@@ -18,6 +18,40 @@ Chronosched models all work as **jobs** and **job definitions**:
 | **Scheduler** | Periodically registers all definitions with `cron_spec` and enqueues new job runs automatically. |
 | **Worker** | Dequeues ready jobs, executes them, renews leases, and marks them `succeeded` or `failed`. |
 
+
+---
+
+## Entity Versioning & Pruning
+
+All core entities in Chronosched are versioned and logically deleted rather than hard-deleted:
+
+- **Job Definitions**
+  - Immutable by design. Any "update" creates a new `(namespace, name, version)` row.
+  - The old version is marked `deleted = TRUE` but may still be referenced by existing jobs/DAGs.
+- **DAGs**
+  - Each DAG row has a `version` and `deleted` flag.
+  - You can safely introduce a new DAG version while old jobs still reference the previous version.
+- **Jobs**
+  - Jobs carry a `version` and a `deleted` flag.
+  - Deleting a job via the API marks it `status = 'cancelled'` and `deleted = TRUE` while preserving history until prune time.
+- **Dependencies**
+  - Edges between jobs live in `job_dependencies` and include a `dependency_type` field:
+    - `order-only` — the child only depends on the **ordering** of the parent (must run after).
+    - `data` (default) — the child both depends on the ordering **and** is assumed to consume the parent’s result.
+
+A dedicated admin endpoint moves no-longer-referenced rows into history tables:
+
+- `POST /api/v1/admin/prune`
+  - Moves prunable rows from:
+    - `job_definitions` → `job_definitions_history`
+    - `dags` → `dags_history`
+    - `jobs` → `jobs_history`
+    - `job_dependencies` → `job_dependencies_history`
+  - Prunable jobs are those that:
+    - are in a terminal status (`succeeded`, `failed`, `cancelled`) **or** explicitly marked `deleted = TRUE`, **and**
+    - have a non-NULL `finished_at`.
+
+This keeps the active working set small while preserving a full audit trail in the history tables.
 ---
 
 ## Scheduling Options

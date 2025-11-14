@@ -51,6 +51,8 @@ func NewRouter(h *Handlers) http.Handler {
 
         r.Route("/definitions/{namespace_id}/{id}", func(r chi.Router) {
             r.Get("/", h.getDefinition)
+            r.Put("/", h.updateDefinition)
+            r.Delete("/", h.deleteDefinition)
         })
 
         // Jobs
@@ -62,23 +64,32 @@ func NewRouter(h *Handlers) http.Handler {
 
         r.Route("/dags/{namespace_id}/{dagId}/jobs/{id}", func(r chi.Router) {
             r.Get("/", h.getJobByPath)
+            r.Put("/", h.updateJob)
+            r.Delete("/", h.deleteJob)
         })
 
         // Dependencies
         r.Route("/dags/{namespace_id}/{dagId}/dependencies", func(r chi.Router) {
-            r.Get("/", h.listDependencies)
-            r.Post("/", h.createDependencies)
+            // Bulk operations
+            r.Get("/", h.listDependencies)    // list or single (when parent_id & child_id are provided)
+            r.Post("/", h.createDependencies) // bulk create
             r.Put("/", h.bulkUpsertDependencies)
+
+            // Individual dependency CRUD
+            r.Patch("/", h.updateDependency)
+            r.Delete("/", h.deleteDependency) // requires parent_id & child_id query params
         })
 
         // Job completion / failure
-        r.Route("/jobs/{namespace_id}/{jobId}", func(r chi.Router) {
+r.Route("/jobs/{namespace_id}/{jobId}", func(r chi.Router) {
             r.Post("/complete", h.complete)
             r.Post("/fail", h.fail)
+            r.Delete("/", h.deleteJobGlobal)
         })
 
         // Admin
         r.Get("/admin/check/global-cycles", h.checkGlobalCycles)
+        r.Post("/admin/prune", h.prune)
     })
 
     return r

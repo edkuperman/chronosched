@@ -5,14 +5,29 @@ DO $$ BEGIN
   CREATE TYPE job_status AS ENUM ('queued','running','succeeded','failed','cancelled');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
+-- Namespaces
+CREATE TABLE IF NOT EXISTS namespaces (
+  namespace_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name         TEXT NOT NULL UNIQUE,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- Root DAG metadata
 CREATE TABLE IF NOT EXISTS dags (
   id UUID PRIMARY KEY,
   namespace  TEXT NOT NULL,
   name       TEXT NOT NULL,
+  version    INT  NOT NULL DEFAULT 1,
+  deleted    BOOLEAN NOT NULL DEFAULT FALSE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE(namespace, name)
+  UNIQUE(namespace, name, version)
 );
+
+-- Enforce uniqueness of active (non-deleted) DAG names within a namespace.
+CREATE UNIQUE INDEX IF NOT EXISTS dags_unique_active_name
+  ON dags(namespace, name)
+  WHERE deleted = FALSE;
+
 
 -- Immutable job definitions (templates)
 CREATE TABLE IF NOT EXISTS job_definitions (
@@ -30,9 +45,17 @@ CREATE TABLE IF NOT EXISTS job_definitions (
   -- This delay is applied after all parent jobs have succeeded.
   delay_interval    INTERVAL,
 
+  deleted           BOOLEAN NOT NULL DEFAULT FALSE,
+
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE(namespace, name, version)
 );
+
+-- Enforce uniqueness of active (non-deleted) definition names within a namespace.
+CREATE UNIQUE INDEX IF NOT EXISTS job_definitions_unique_active_name
+  ON job_definitions(namespace, name)
+  WHERE deleted = FALSE;
+
 
 -- Prevent updates to definitions (immutability)
 CREATE OR REPLACE FUNCTION prevent_jobdef_update()
@@ -51,6 +74,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   id           BIGSERIAL PRIMARY KEY,
   dag_id       UUID NOT NULL REFERENCES dags(id) ON DELETE CASCADE,
   def_id       UUID NOT NULL REFERENCES job_definitions(def_id),
+  version       INT NOT NULL DEFAULT 1,
+  deleted       BOOLEAN NOT NULL DEFAULT FALSE,
   status       job_status NOT NULL DEFAULT 'queued',
   priority     INT NOT NULL DEFAULT 0,
   due_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -70,8 +95,10 @@ CREATE TABLE IF NOT EXISTS job_dependencies (
   dag_id        UUID NOT NULL,
   parent_job_id BIGINT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
   child_job_id  BIGINT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+  dependency_type TEXT NOT NULL DEFAULT 'data',
   PRIMARY KEY (dag_id, parent_job_id, child_job_id),
-  CHECK (parent_job_id <> child_job_id)
+  CHECK (parent_job_id <> child_job_id),
+  CHECK (dependency_type IN ('order-only','data'))
 );
 
 -- Transitive closure for reachability (used for cycle detection)
@@ -225,3 +252,58 @@ BEGIN
 
   DELETE FROM dags WHERE id = p_dag;
 END; $$;
+
+
+-- History tables for pruned entities
+
+CREATE TABLE IF NOT EXISTS dags_history (
+  id         UUID NOT NULL,
+  namespace  TEXT NOT NULL,
+  name       TEXT NOT NULL,
+  version    INT  NOT NULL,
+  deleted    BOOLEAN NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL,
+  archived_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS job_definitions_history (
+  def_id           UUID NOT NULL,
+  namespace        TEXT NOT NULL,
+  name             TEXT NOT NULL,
+  version          INT  NOT NULL,
+  kind             TEXT NOT NULL,
+  payload_template JSONB NOT NULL,
+  cron_spec        TEXT,
+  delay_interval   INTERVAL,
+  deleted          BOOLEAN NOT NULL,
+  created_at       TIMESTAMPTZ NOT NULL,
+  archived_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS jobs_history (
+  id           BIGINT NOT NULL,
+  dag_id       UUID NOT NULL,
+  def_id       UUID NOT NULL,
+  status       job_status NOT NULL,
+  priority     INT NOT NULL,
+  due_at       TIMESTAMPTZ NOT NULL,
+  payload_json JSONB NOT NULL,
+  binary_data  BYTEA,
+  lease_owner  TEXT,
+  lease_until  TIMESTAMPTZ,
+  enqueued_at  TIMESTAMPTZ NOT NULL,
+  started_at   TIMESTAMPTZ,
+  finished_at  TIMESTAMPTZ,
+  last_error   TEXT,
+  version      INT NOT NULL,
+  deleted      BOOLEAN NOT NULL,
+  archived_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS job_dependencies_history (
+  dag_id          UUID NOT NULL,
+  parent_job_id   BIGINT NOT NULL,
+  child_job_id    BIGINT NOT NULL,
+  dependency_type TEXT NOT NULL,
+  archived_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);

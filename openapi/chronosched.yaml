@@ -118,7 +118,9 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/CountResponse'
+                type: array
+                items:
+                  $ref: '#/components/schemas/DAGCreateResponse'
     put:
       summary: Upsert DAGs (bulk)
       requestBody:
@@ -257,6 +259,39 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/JobDefinition'
+    put:
+      summary: Create a new version of a definition
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/JobDefinitionCreateRequest'
+      responses:
+        '200':
+          description: New version created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  old_def_id:
+                    type: string
+                    format: uuid
+                  new_def_id:
+                    type: string
+                    format: uuid
+                  namespace:
+                    type: string
+                  name:
+                    type: string
+                  new_version:
+                    type: integer
+    delete:
+      summary: Soft-delete a specific definition version
+      responses:
+        '204':
+          description: Deleted
   /api/v1/dags/{namespace_id}/{dagId}/jobs:
     parameters:
     - name: namespace_id
@@ -342,6 +377,30 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Job'
+    put:
+      summary: Update mutable fields of a queued job
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                priority:
+                  type: integer
+                due_at:
+                  type: string
+                  format: date-time
+                payload_json:
+                  type: object
+      responses:
+        '204':
+          description: Updated
+    delete:
+      summary: Cancel job (soft delete)
+      responses:
+        '204':
+          description: Cancelled
   /api/v1/dags/{namespace_id}/{dagId}/dependencies:
     parameters:
     - name: namespace_id
@@ -356,16 +415,32 @@ paths:
         type: string
         format: uuid
     get:
-      summary: List dependencies
+      summary: List dependencies for a DAG or fetch a single dependency when parent_id and child_id are provided.
+      parameters:
+      - name: parent_id
+        in: query
+        required: false
+        schema:
+          type: integer
+      - name: child_id
+        in: query
+        required: false
+        schema:
+          type: integer
       responses:
         '200':
-          description: List
+          description: List of dependencies (or a single dependency when filtered by parent_id and child_id)
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/Dependency'
+                type: object
+                properties:
+                  count:
+                    type: integer
+                  results:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Dependency'
     post:
       summary: Create dependencies (bulk)
       requestBody:
@@ -400,7 +475,52 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/CountResponse'
-  /api/v1/jobs/{namespace_id}/{jobId}/complete:
+    patch:
+      summary: Update an individual dependency type
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DependencyCreateRequest'
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Dependency'
+    delete:
+      summary: Delete an individual dependency (and archive it to history)
+      parameters:
+      - name: parent_id
+        in: query
+        required: true
+        schema:
+          type: integer
+      - name: child_id
+        in: query
+        required: true
+        schema:
+          type: integer
+      responses:
+        '200':
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  dag_id:
+                    type: string
+                    format: uuid
+                  parent_job_id:
+                    type: integer
+                  child_job_id:
+                    type: integer
+                  archived:
+                    type: boolean
+\n/api/v1/jobs/{namespace_id}/{jobId}/complete:
     parameters:
     - name: namespace_id
       in: path
@@ -512,16 +632,12 @@ components:
       type: object
       required:
       - name
-      - version
       - kind
       - payload_template
       properties:
         name:
           type: string
           example: ParentJob
-        version:
-          type: integer
-          example: 1
         kind:
           type: string
           enum:
@@ -562,10 +678,18 @@ components:
           type: object
           example:
             cmd: echo hello
+        cron_spec:
+          type: string
+          nullable: true
+        delay_interval:
+          type: string
+          nullable: true
         created_at:
           type: string
           format: date-time
           example: '2025-11-11T03:40:05Z'
+        deleted:
+          type: boolean          
     JobCreate:
       type: object
       required:
@@ -632,6 +756,20 @@ components:
         ChildID:
           type: integer
           example: 102
+        dependency_type:
+          type: string
+          enum: [order-only, data]
+          description: >
+            If omitted, defaults to 'data'. When set to 'data', the child
+            is assumed to consume data from the parent in addition to ordering
+            semantics.
+    DAGCreateResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "2fd2fef5-3a9d-44e1-b5a2-34da5e58aeb3"    
     Dependency:
       type: object
       properties:
@@ -641,6 +779,10 @@ components:
         child_job_id:
           type: integer
           example: 102
+        dependency_type:
+          type: string
+          enum: [order-only, data]
+          example: order-only
     FailRequest:
       type: object
       required:
@@ -675,3 +817,27 @@ components:
                   type: array
                   items:
                     type: string
+  /api/v1/admin/prune:
+    post:
+      summary: Prune archived entities into history tables
+      description: >
+        Move logically deleted or fully completed entities (job definitions, DAGs,
+        jobs, and their dependencies) into history tables so that the active
+        working set stays small. This operation is idempotent.
+      responses:
+        '200':
+          description: Prune result with counts of archived rows.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job_definitions_archived:
+                    type: integer
+                  dags_archived:
+                    type: integer
+                  jobs_archived:
+                    type: integer
+                  dependencies_archived:
+                    type: integer
+
