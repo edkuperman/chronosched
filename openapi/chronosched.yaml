@@ -3,8 +3,13 @@ info:
   title: Chronosched API
   version: 1.0.0
 servers:
-- url: http://localhost:8080
+  - url: http://localhost:8080
+
 paths:
+
+  ###############################
+  # Health
+  ###############################
   /healthz:
     get:
       summary: Health check
@@ -16,6 +21,10 @@ paths:
               schema:
                 type: string
                 example: ok
+
+  ###############################
+  # Namespaces
+  ###############################
   /api/v1/namespaces:
     get:
       summary: List namespaces
@@ -43,13 +52,14 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Namespace'
+
   /api/v1/namespace/{name}:
     parameters:
-    - name: name
-      in: path
-      required: true
-      schema:
-        type: string
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
     get:
       summary: Get namespace
       responses:
@@ -84,15 +94,19 @@ paths:
       responses:
         '204':
           description: Deleted
+
+  ###############################
+  # DAGs
+  ###############################
   /api/v1/dags/{namespace_id}:
     parameters:
-    - name: namespace_id
-      in: path
-      required: true
-      schema:
-        type: string
+      - name: namespace_id
+        in: path
+        required: true
+        schema:
+          type: string
     get:
-      summary: List DAGs
+      summary: List DAGs in namespace
       responses:
         '200':
           description: List
@@ -132,25 +146,26 @@ paths:
               items:
                 $ref: '#/components/schemas/DAGCreateRequest'
       responses:
-        '200':
-          description: Upserted
+        '207':
+          description: Multi-status
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/CountResponse'
+                $ref: '#/components/schemas/DAGUpsertResponse'
+
   /api/v1/dags/{namespace_id}/{id}:
     parameters:
-    - name: namespace_id
-      in: path
-      required: true
-      schema:
-        type: string
-    - name: id
-      in: path
-      required: true
-      schema:
-        type: string
-        format: uuid
+      - name: namespace_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
     get:
       summary: Get DAG
       responses:
@@ -168,11 +183,11 @@ paths:
           application/json:
             schema:
               type: object
+              required:
+                - name
               properties:
                 name:
                   type: string
-              required:
-              - name
       responses:
         '200':
           description: Updated
@@ -185,13 +200,17 @@ paths:
       responses:
         '204':
           description: Deleted
+
+  ###############################
+  # Job Definitions
+  ###############################
   /api/v1/definitions/{namespace_id}:
     parameters:
-    - name: namespace_id
-      in: path
-      required: true
-      schema:
-        type: string
+      - name: namespace_id
+        in: path
+        required: true
+        schema:
+          type: string
     get:
       summary: List definitions
       responses:
@@ -219,7 +238,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/CountResponse'
+                $ref: '#/components/schemas/BulkDefinitionResponse'
     put:
       summary: Upsert definitions (bulk)
       requestBody:
@@ -231,25 +250,26 @@ paths:
               items:
                 $ref: '#/components/schemas/JobDefinitionCreateRequest'
       responses:
-        '200':
-          description: Upserted
+        '207':
+          description: Multi-status
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/CountResponse'
+                $ref: '#/components/schemas/BulkDefinitionResponse'
+
   /api/v1/definitions/{namespace_id}/{id}:
     parameters:
-    - name: namespace_id
-      in: path
-      required: true
-      schema:
-        type: string
-    - name: id
-      in: path
-      required: true
-      schema:
-        type: string
-        format: uuid
+      - name: namespace_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
     get:
       summary: Get definition
       responses:
@@ -273,38 +293,24 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  old_def_id:
-                    type: string
-                    format: uuid
-                  new_def_id:
-                    type: string
-                    format: uuid
-                  namespace:
-                    type: string
-                  name:
-                    type: string
-                  new_version:
-                    type: integer
+                $ref: '#/components/schemas/JobDefinitionUpdateResponse'
     delete:
-      summary: Soft-delete a specific definition version
+      summary: Soft-delete a definition version
       responses:
         '204':
           description: Deleted
-  /api/v1/dags/{namespace_id}/{dagId}/jobs:
+
+  ###############################
+  # Jobs (DAG-scoped)
+  ###############################
+  /api/v1/dags/{dag_id}/jobs:
     parameters:
-    - name: namespace_id
-      in: path
-      required: true
-      schema:
-        type: string
-    - name: dagId
-      in: path
-      required: true
-      schema:
-        type: string
-        format: uuid
+      - name: dag_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
     get:
       summary: List jobs in DAG
       responses:
@@ -315,7 +321,7 @@ paths:
               schema:
                 type: array
                 items:
-                  $ref: '#/components/schemas/Job'
+                  $ref: '#/components/schemas/JobListItem'
     post:
       summary: Create jobs (bulk)
       requestBody:
@@ -332,7 +338,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/CountResponse'
+                $ref: '#/components/schemas/JobUpsertResponse'
     put:
       summary: Upsert jobs (bulk)
       requestBody:
@@ -344,32 +350,28 @@ paths:
               items:
                 $ref: '#/components/schemas/JobCreate'
       responses:
-        '200':
-          description: Upserted
+        '207':
+          description: Multi-status
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/CountResponse'
-  /api/v1/dags/{namespace_id}/{dagId}/jobs/{id}:
+                $ref: '#/components/schemas/JobUpsertResponse'
+
+  /api/v1/dags/{dag_id}/jobs/{id}:
     parameters:
-    - name: namespace_id
-      in: path
-      required: true
-      schema:
-        type: string
-    - name: dagId
-      in: path
-      required: true
-      schema:
-        type: string
-        format: uuid
-    - name: id
-      in: path
-      required: true
-      schema:
-        type: integer
+      - name: dag_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
     get:
-      summary: Get job by id (in DAG)
+      summary: Get job
       responses:
         '200':
           description: Job
@@ -378,7 +380,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Job'
     put:
-      summary: Update mutable fields of a queued job
+      summary: Update queued job
       requestBody:
         required: true
         content:
@@ -397,39 +399,83 @@ paths:
         '204':
           description: Updated
     delete:
-      summary: Cancel job (soft delete)
+      summary: Cancel job
       responses:
         '204':
           description: Cancelled
-  /api/v1/dags/{namespace_id}/{dagId}/dependencies:
-    parameters:
-    - name: namespace_id
-      in: path
-      required: true
-      schema:
-        type: string
-    - name: dagId
-      in: path
-      required: true
-      schema:
-        type: string
-        format: uuid
-    get:
-      summary: List dependencies for a DAG or fetch a single dependency when parent_id and child_id are provided.
+
+  ###############################
+  # Job lifecycle (DAG scoped)
+  ###############################
+  /api/v1/dags/{dag_id}/jobs/{jobId}/complete:
+    post:
+      summary: Mark job complete
       parameters:
-      - name: parent_id
-        in: query
-        required: false
+        - name: dag_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: jobId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '204':
+          description: Complete
+
+  /api/v1/dags/{dag_id}/jobs/{jobId}/fail:
+    post:
+      summary: Mark job failed
+      parameters:
+        - name: dag_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: jobId
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FailRequest'
+      responses:
+        '204':
+          description: Failed
+
+  ###############################
+  # Dependencies (DAG-scoped)
+  ###############################
+  /api/v1/dags/{dag_id}/dependencies:
+    parameters:
+      - name: dag_id
+        in: path
+        required: true
         schema:
-          type: integer
-      - name: child_id
-        in: query
-        required: false
-        schema:
-          type: integer
+          type: string
+          format: uuid
+    get:
+      summary: List dependencies or fetch one by parent/child
+      parameters:
+        - name: parent_id
+          in: query
+          required: false
+          schema:
+            type: integer
+        - name: child_id
+          in: query
+          required: false
+          schema:
+            type: integer
       responses:
         '200':
-          description: List of dependencies (or a single dependency when filtered by parent_id and child_id)
+          description: Dependencies
           content:
             application/json:
               schema:
@@ -469,14 +515,14 @@ paths:
               items:
                 $ref: '#/components/schemas/DependencyCreateRequest'
       responses:
-        '200':
-          description: Upserted
+        '207':
+          description: Multi-status
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/CountResponse'
     patch:
-      summary: Update an individual dependency type
+      summary: Update dependency type
       requestBody:
         required: true
         content:
@@ -491,18 +537,18 @@ paths:
               schema:
                 $ref: '#/components/schemas/Dependency'
     delete:
-      summary: Delete an individual dependency (and archive it to history)
+      summary: Delete dependency (archive to history)
       parameters:
-      - name: parent_id
-        in: query
-        required: true
-        schema:
-          type: integer
-      - name: child_id
-        in: query
-        required: true
-        schema:
-          type: integer
+        - name: parent_id
+          in: query
+          required: true
+          schema:
+            type: integer
+        - name: child_id
+          in: query
+          required: true
+          schema:
+            type: integer
       responses:
         '200':
           description: Deleted
@@ -513,320 +559,33 @@ paths:
                 properties:
                   dag_id:
                     type: string
-                    format: uuid
                   parent_job_id:
                     type: integer
                   child_job_id:
                     type: integer
                   archived:
                     type: boolean
-\n/api/v1/jobs/{namespace_id}/{jobId}/complete:
-    parameters:
-    - name: namespace_id
-      in: path
-      required: true
-      schema:
-        type: string
-    - name: jobId
-      in: path
-      required: true
-      schema:
-        type: integer
-    post:
-      summary: Mark job complete
-      responses:
-        '204':
-          description: Completed
-  /api/v1/jobs/{namespace_id}/{jobId}/fail:
-    parameters:
-    - name: namespace_id
-      in: path
-      required: true
-      schema:
-        type: string
-    - name: jobId
-      in: path
-      required: true
-      schema:
-        type: integer
-    post:
-      summary: Mark job failed
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/FailRequest'
-      responses:
-        '204':
-          description: Failed set
+
+  ###############################
+  # Admin
+  ###############################
   /api/v1/admin/check/global-cycles:
     get:
-      summary: Check global cycles across all DAGs
+      summary: Detect global cycles across all DAGs
       responses:
         '200':
-          description: Cycle check
+          description: Results
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/CycleCheckResponse'
-components:
-  schemas:
-    NamespaceCreateRequest:
-      type: object
-      required:
-      - name
-      properties:
-        name:
-          type: string
-          example: demo
-    NamespaceRenameRequest:
-      type: object
-      required:
-      - new_name
-      properties:
-        new_name:
-          type: string
-          example: prod
-    Namespace:
-      type: object
-      properties:
-        namespace_id:
-          type: string
-          format: uuid
-          example: 4e8b2f8c-74a1-4c3e-97de-4f43eb3a0c9b
-        name:
-          type: string
-          example: demo
-    DAGCreateRequest:
-      type: object
-      required:
-      - id
-      - name
-      properties:
-        id:
-          type: string
-          format: uuid
-          example: 2fd2fef5-3a9d-44e1-b5a2-34da5e58aeb3
-        name:
-          type: string
-          example: nightly_etl
-    DAG:
-      type: object
-      properties:
-        id:
-          type: string
-          format: uuid
-          example: 2fd2fef5-3a9d-44e1-b5a2-34da5e58aeb3
-        namespace:
-          type: string
-          example: demo
-        name:
-          type: string
-          example: nightly_etl
-        created_at:
-          type: string
-          format: date-time
-          example: '2025-11-11T03:40:05Z'
-    JobDefinitionCreateRequest:
-      type: object
-      required:
-      - name
-      - kind
-      - payload_template
-      properties:
-        name:
-          type: string
-          example: ParentJob
-        kind:
-          type: string
-          enum:
-          - cmd
-          - http
-          - binary
-          example: cmd
-        payload_template:
-          type: object
-          example:
-            cmd: echo hello
-        cron_spec:
-          type: string
-          example: '@every 5s'
-        delay_interval:
-          type: string
-          example: 5 minutes
-    JobDefinition:
-      type: object
-      properties:
-        def_id:
-          type: string
-          format: uuid
-          example: c413e1f9-9127-47c5-bb77-f98aa1b3ec50
-        namespace:
-          type: string
-          example: demo
-        name:
-          type: string
-          example: ParentJob
-        version:
-          type: integer
-          example: 1
-        kind:
-          type: string
-          example: cmd
-        payload_template:
-          type: object
-          example:
-            cmd: echo hello
-        cron_spec:
-          type: string
-          nullable: true
-        delay_interval:
-          type: string
-          nullable: true
-        created_at:
-          type: string
-          format: date-time
-          example: '2025-11-11T03:40:05Z'
-        deleted:
-          type: boolean          
-    JobCreate:
-      type: object
-      required:
-      - def_id
-      properties:
-        def_id:
-          type: string
-          format: uuid
-          example: c413e1f9-9127-47c5-bb77-f98aa1b3ec50
-        payload:
-          type: string
-          example: '{}'
-        priority:
-          type: integer
-          example: 0
-        due_at:
-          type: string
-          format: date-time
-          example: '2025-11-11T04:10:00Z'
-    Job:
-      type: object
-      properties:
-        id:
-          type: integer
-          example: 101
-        dag_id:
-          type: string
-          format: uuid
-          example: 2fd2fef5-3a9d-44e1-b5a2-34da5e58aeb3
-        def_id:
-          type: string
-          format: uuid
-          example: c413e1f9-9127-47c5-bb77-f98aa1b3ec50
-        status:
-          type: string
-          enum:
-          - waiting
-          - queued
-          - running
-          - succeeded
-          - failed
-          - cancelled
-          example: queued
-        kind:
-          type: string
-          example: cmd
-        payload_json:
-          type: object
-          example:
-            cmd: echo hello
-        due_at:
-          type: string
-          format: date-time
-          example: '2025-11-11T04:10:00Z'
-    DependencyCreateRequest:
-      type: object
-      required:
-      - ParentID
-      - ChildID
-      properties:
-        ParentID:
-          type: integer
-          example: 101
-        ChildID:
-          type: integer
-          example: 102
-        dependency_type:
-          type: string
-          enum: [order-only, data]
-          description: >
-            If omitted, defaults to 'data'. When set to 'data', the child
-            is assumed to consume data from the parent in addition to ordering
-            semantics.
-    DAGCreateResponse:
-      type: object
-      properties:
-        id:
-          type: string
-          format: uuid
-          example: "2fd2fef5-3a9d-44e1-b5a2-34da5e58aeb3"    
-    Dependency:
-      type: object
-      properties:
-        parent_job_id:
-          type: integer
-          example: 101
-        child_job_id:
-          type: integer
-          example: 102
-        dependency_type:
-          type: string
-          enum: [order-only, data]
-          example: order-only
-    FailRequest:
-      type: object
-      required:
-      - error
-      properties:
-        error:
-          type: string
-          example: exit code 1
-    CountResponse:
-      type: object
-      properties:
-        count:
-          type: integer
-          example: 2
-    CycleCheckResponse:
-      type: object
-      properties:
-        count:
-          type: integer
-          example: 0
-        results:
-          type: array
-          items:
-            type: object
-            properties:
-              dag_id:
-                type: string
-                format: uuid
-              cycles:
-                type: array
-                items:
-                  type: array
-                  items:
-                    type: string
+
   /api/v1/admin/prune:
     post:
-      summary: Prune archived entities into history tables
-      description: >
-        Move logically deleted or fully completed entities (job definitions, DAGs,
-        jobs, and their dependencies) into history tables so that the active
-        working set stays small. This operation is idempotent.
+      summary: Archive deleted/finished resources into history tables
       responses:
         '200':
-          description: Prune result with counts of archived rows.
+          description: Archive summary
           content:
             application/json:
               schema:
@@ -841,3 +600,305 @@ components:
                   dependencies_archived:
                     type: integer
 
+#################################
+# COMPONENT SCHEMAS
+#################################
+components:
+  schemas:
+
+    NamespaceCreateRequest:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          example: demo
+
+    NamespaceRenameRequest:
+      type: object
+      required:
+        - new_name
+      properties:
+        new_name:
+          type: string
+          example: prod
+
+    Namespace:
+      type: object
+      properties:
+        namespace_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+
+    DAGCreateRequest:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+
+    DAGCreateResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        version:
+          type: integer
+
+    DAGUpsertResult:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          nullable: true
+        name:
+          type: string
+        version:
+          type: integer
+        error:
+          type: string
+
+    DAGUpsertResponse:
+      type: object
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/DAGUpsertResult'
+
+    DAG:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        namespace:
+          type: string
+        name:
+          type: string
+        version:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        deleted:
+          type: boolean
+
+    JobDefinitionCreateRequest:
+      type: object
+      required:
+        - name
+        - kind
+        - payload_template
+      properties:
+        name:
+          type: string
+        kind:
+          type: string
+          enum: [cmd, http, binary]
+        payload_template:
+          type: object
+        cron_spec:
+          type: string
+        delay_interval:
+          type: string
+
+    JobDefinition:
+      type: object
+      properties:
+        def_id:
+          type: string
+        namespace:
+          type: string
+        name:
+          type: string
+        version:
+          type: integer
+        kind:
+          type: string
+        payload_template:
+          type: object
+        cron_spec:
+          type: string
+          nullable: true
+        delay_interval:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        deleted:
+          type: boolean
+
+    JobDefinitionResult:
+      type: object
+      properties:
+        def_id:
+          type: string
+        name:
+          type: string
+        version:
+          type: integer
+        error:
+          type: string
+
+    BulkDefinitionResponse:
+      type: object
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/JobDefinitionResult'
+
+    JobDefinitionUpdateResponse:
+      type: object
+      properties:
+        def_id:
+          type: string
+        namespace:
+          type: string
+        name:
+          type: string
+        version:
+          type: integer
+
+    JobCreate:
+      type: object
+      required:
+        - def_id
+      properties:
+        def_id:
+          type: string
+        payload:
+          type: string
+        priority:
+          type: integer
+        due_at:
+          type: string
+          format: date-time
+
+    Job:
+      type: object
+      properties:
+        id:
+          type: integer
+        dag_id:
+          type: string
+        def_id:
+          type: string
+        status:
+          type: string
+          enum: [waiting, queued, running, succeeded, failed, cancelled]
+        kind:
+          type: string
+        payload_json:
+          type: object
+        due_at:
+          type: string
+          format: date-time
+
+    JobListItem:
+      type: object
+      required:
+        - id
+        - def_id
+        - dag_id
+        - status
+      properties:
+        id:
+          type: integer
+        def_id:
+          type: string
+        dag_id:
+          type: string
+        status:
+          type: string
+
+    JobUpsertResult:
+      type: object
+      required: [def_id]
+      properties:
+        def_id:
+          type: string
+        id:
+          type: integer
+          format: int64
+          nullable: true
+        error:
+          type: string
+
+    JobUpsertResponse:
+      type: object
+      required:
+        - results
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/JobUpsertResult'
+
+    DependencyCreateRequest:
+      type: object
+      required:
+        - ParentID
+        - ChildID
+      properties:
+        ParentID:
+          type: integer
+        ChildID:
+          type: integer
+        dependency_type:
+          type: string
+          enum: [order-only, data]
+
+    Dependency:
+      type: object
+      properties:
+        parent_job_id:
+          type: integer
+        child_job_id:
+          type: integer
+        dependency_type:
+          type: string
+          enum: [order-only, data]
+
+    FailRequest:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string
+
+    CountResponse:
+      type: object
+      properties:
+        count:
+          type: integer
+
+    CycleCheckResponse:
+      type: object
+      properties:
+        count:
+          type: integer
+        results:
+          type: array
+          items:
+            type: object
+            properties:
+              dag_id:
+                type: string
+              cycles:
+                type: array
+                items:
+                  type: array
+                  items:
+                    type: string

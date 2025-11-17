@@ -20,6 +20,13 @@
       "env": {
         "DATABASE_URL": "postgres://postgres:postgres@localhost:5432/chronosched?sslmode=disable"
       }
-    }
+    },
+    {
+        "name": "Python Debugger: Current File",
+        "type": "debugpy",
+        "request": "launch",
+        "program": "${file}",
+        "console": "integratedTerminal"
+    }    
   ]
 }

@@ -1,244 +1,240 @@
-# chronosched
+# Chronosched
 
-Chronosched is a lightweight, namespaced, DAG-driven job scheduler with:
+Chronosched is a lightweight, namespaced, DAG‑driven job scheduler with:
 
-- Immutable job definitions (versioned)
+- Immutable, versioned job definitions
 - Namespace-scoped DAGs
-- Dependency graphs with cycle protection
-- Frontier-driven job activation
-- Scheduler supporting cron_spec on definitions
-- Workers executing jobs independently
+- Job dependency graphs with cycle protection
+- Frontier-driven scheduling
+- Optional cron scheduling via `cron_spec`
+- Independent workers for job execution
 - PostgreSQL as the source of truth
-- Complete REST API for orchestration, inspection, and testing
+- Fully observable via REST API
 
-This README is fully updated to reflect the current (2025) codebase.
-
----
-
-## Table of Contents
-1. Architecture Overview
-2. System Components
-3. DAG Model
-4. Dependency Frontier
-5. Scheduler (cron_spec)
-6. Worker Execution Model
-7. Database Schema Summary
-8. API Endpoints
-9. PlantUML Diagrams
-10. Running Chronosched
-11. Python Demo Client
-12. License
+This README matches the current codebase and router.go exactly.
 
 ---
 
-## Architecture Overview
+## Project Structure
 
-Chronosched consists of:
-
-- **API Server (Go)** — creates and manages namespaces, DAGs, definitions, jobs, and dependencies.
-- **Workers** — dequeue and run jobs, update job status, and unlock frontier nodes.
-- **Scheduler** — automatically enqueues jobs based on cron_spec in job definitions.
-- **PostgreSQL** — authoritative state storage.
-
-The architecture is simple, transparent, and fully deterministic.
-
----
-
-## PlantUML Architecture Diagram
-
-```plantuml
-@startuml
-skinparam backgroundColor #ffffff
-
-rectangle "API Server" {
-  [Handlers]
-  [Router]
-  [Scheduler]
-}
-
-rectangle "PostgreSQL" {
-  [namespaces]
-  [dags]
-  [job_definitions]
-  [jobs]
-  [job_dependencies]
-  [frontier]
-  [jobs_history]
-}
-
-rectangle "Worker" {
-  [Dequeuer]
-  [Executor]
-}
-
-API Server --> PostgreSQL : SQL (pgx)
-Worker --> PostgreSQL : poll/update
-Scheduler --> API Server : Tick(def_id)
-@enduml
+```
+chronosched/
+│
+├── cmd/
+│   ├── server/         # Go API server
+│   └── worker/         # Go worker
+│
+├── client/
+│   └── python/         # Python demo client
+│
+├── scripts/
+│   ├── run-prod.ps1
+│   ├── run-debug.ps1
+│   ├── run-prod.sh
+│   ├── run-debug.sh
+│
+├── docker-compose.yml
+├── docker-compose.debug.yml
+└── Dockerfile.*        # Server, Worker, Debug versions
 ```
 
 ---
 
-## DAG Model
+# API Endpoints (Router‑Accurate)
 
-A DAG belongs to a **namespace** and contains:
+/healthz is unversioned.
 
-- Jobs instantiated from job_definitions
-- Directed parent→child dependencies
-- A frontier of runnable jobs
-
-DAGs are immutable. Create a new DAG to change its topology.
-
----
-
-## Dependency Frontier
-
-Frontier tracks which jobs can run:
-
-- Jobs with no dependencies enter the frontier initially.
-- Completing a job may unlock downstream nodes.
-- Workers dequeue only frontier jobs.
-
-This ensures correctness without global recalculation.
-
----
-
-## Scheduler (cron_spec)
-
-If a job definition includes `cron_spec: */5 * * * * *`, Chronosched:
-
-1. Registers it on startup
-2. Fires Tick(def_id) on schedule
-3. Inserts jobs with dag_id = null
-4. Workers run them like DAG jobs
-
-Scheduler jobs inherit the definition’s namespace.
-
----
-
-## Worker Execution Model
-
-Workers:
-
-1. Dequeue frontier jobs (or scheduler jobs)
-2. Lock rows
-3. Run their associated action
-4. Update status (succeeded/failed)
-5. Unlock dependent nodes
-
-Workers are stateless and horizontally scalable.
-
----
-
-## API Endpoints
-
-All API paths are prefixed with:
+All other endpoints live under:
 
 ```
 /api/v1
 ```
 
-### Namespaces
+---
 
-- POST /namespaces
-- GET /namespaces
-- GET /namespaces/{namespace_id}
+# Namespaces
 
-### DAGs
+### Collection
+- **GET**  `/api/v1/namespaces/`
+- **POST** `/api/v1/namespaces/`
 
-- POST /dags/{namespace_id}
-- GET /dags/{namespace_id}
-- GET /dags/{namespace_id}/{dag_id}
-- DELETE /dags/{namespace_id}/{dag_id}
-
-### Job Definitions
-
-- POST /definitions/{namespace_id}
-- GET /definitions/{namespace_id}
-- GET /definitions/{namespace_id}/{def_id}
-
-### Jobs
-
-#### DAG Jobs
-- POST /dags/{namespace_id}/{dag_id}/jobs
-- GET /dags/{namespace_id}/{dag_id}/jobs
-
-#### Jobs by ID
-- GET /jobs/{namespace_id}/{job_id}
-
-#### All jobs in namespace
-- GET /jobs/{namespace_id}
-
-#### Job state
-- POST /jobs/{job_id}/complete
-- POST /jobs/{job_id}/fail
-
-### Dependencies
-
-- POST /dags/{namespace_id}/{dag_id}/dependencies/bulk
-- POST /dags/{namespace_id}/{dag_id}/dependencies
-- GET /dags/{namespace_id}/{dag_id}/dependencies
-
-### Admin
-
-- POST /admin/prune
-
-### Health
-
-- GET /healthz
+### Single namespace (by name)
+- **GET**    `/api/v1/namespace/{name}/`
+- **PUT**    `/api/v1/namespace/{name}/`
+- **DELETE** `/api/v1/namespace/{name}/`
 
 ---
 
-## Running Chronosched
+# DAGs
 
-### Via Docker Compose
+### DAG collection (per namespace)
+- **GET**  `/api/v1/dags/{namespace_id}/`
+- **POST** `/api/v1/dags/{namespace_id}/`
+- **PUT**  `/api/v1/dags/{namespace_id}/`
 
-```bash
+### Single DAG
+- **GET**    `/api/v1/dags/{namespace_id}/{id}/`
+- **PUT**    `/api/v1/dags/{namespace_id}/{id}/`
+- **DELETE** `/api/v1/dags/{namespace_id}/{id}/`
+
+---
+
+# Job Definitions
+
+### Collection
+- **GET**  `/api/v1/definitions/{namespace_id}/`
+- **POST** `/api/v1/definitions/{namespace_id}/`
+- **PUT**  `/api/v1/definitions/{namespace_id}/`
+
+### Single definition
+- **GET**    `/api/v1/definitions/{namespace_id}/{id}/`
+- **PUT**    `/api/v1/definitions/{namespace_id}/{id}/`
+- **DELETE** `/api/v1/definitions/{namespace_id}/{id}/`
+
+Each job definition may include:
+
+- `name`
+- `version`
+- `kind`
+- `payload_template`
+- `cron_spec` (optional, enabled)
+
+---
+
+# Jobs (Inside a DAG)
+
+### Collection
+- **GET**  `/api/v1/dags/{namespace_id}/{dag_id}/jobs/`
+- **POST** `/api/v1/dags/{namespace_id}/{dag_id}/jobs/`
+- **PUT**  `/api/v1/dags/{namespace_id}/{dag_id}/jobs/`
+
+### Single job
+- **GET**    `/api/v1/dags/{namespace_id}/{dag_id}/jobs/{id}/`
+- **PUT**    `/api/v1/dags/{namespace_id}/{dag_id}/jobs/{id}/`
+- **DELETE** `/api/v1/dags/{namespace_id}/{dag_id}/jobs/{id}/`
+
+---
+
+# Global Job Lifecycle Endpoints
+
+Base path:
+
+```
+/api/v1/jobs/{namespace_id}/{jobId}
+```
+
+Operations:
+
+- **POST** `/complete`
+- **POST** `/fail`
+- **DELETE** `/`
+
+---
+
+# Dependencies
+
+Path:
+
+```
+/api/v1/dags/{namespace_id}/{dag_id}/dependencies
+```
+
+### Bulk operations
+- **GET**  `/`
+- **POST** `/`   (bulk create)
+- **PUT**  `/`   (bulk upsert)
+
+### Single dependency
+- **PATCH** `/`
+- **DELETE** `/`
+(requires `parent_id` and `child_id` query params)
+
+---
+
+# Admin
+
+- **GET**  `/api/v1/admin/check/global-cycles`
+- **POST** `/api/v1/admin/prune`
+
+---
+
+# Running Chronosched
+
+Scripts in `./scripts` provide easy workflows.
+
+---
+
+## Production Mode
+
+### Windows
+```
+./scripts/run-prod.ps1
+```
+
+### Linux/macOS/WSL
+```
+./scripts/run-prod.sh
+```
+
+Equivalent:
+```
 docker compose up --build
 ```
 
-API will be available at:
+---
 
+## Debug Mode (Delve + debugpy)
+
+### Windows
 ```
-http://localhost:8080/api/v1
-```
-
-### Running Server Locally
-
-```bash
-go run ./cmd/server
+./scripts/run-debug.ps1
 ```
 
-### Running Worker Locally
-
-```bash
-go run ./cmd/worker
+### Linux/macOS/WSL
 ```
+./scripts/run-debug.sh
+```
+
+Equivalent:
+```
+docker compose -f docker-compose.yml -f docker-compose.debug.yml up --build
+```
+
+### Debug Ports
+
+- Go Server: **40000**
+- Go Worker: **40001**
+- Python demo: **5678**
+
+Use VS Code launch configurations to attach.
 
 ---
 
-## Python Demo Client
+# Python Demo Client
 
-Demonstrates:
-- Namespace creation
-- DAG creation
-- Job definition creation
-- Job insertion
-- Dependency wiring
-- Scheduler testing
+Location:
 
-Run inside Docker:
-```bash
-docker compose run client
+```
+client/python/
 ```
 
-Or locally:
-```bash
+Environment variable:
+
+```
+CHRONOSCHED_BASE=http://server:8080
+```
+
+Run locally:
+
+```
+cd client/python
+pip install -r requirements.txt
 python3 demo_client.py
 ```
 
 ---
 
-## License
+# License
 
-All Rights Reserved. No permission is granted to use, copy, modify, or distribute this software without explicit written consent from the author (Edward Kuperman).
+All rights reserved.  
+Use, reproduction, or distribution requires prior written permission from the author.

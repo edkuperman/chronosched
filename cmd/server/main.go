@@ -19,6 +19,7 @@ func main() {
 
 
     sched := scheduler.New(h.JobRepo(), pool)
+    h.SetScheduler(sched)
     if err := sched.LoadAndRegister(ctx); err != nil {
         log.Fatalf("scheduler startup failed: %v", err)
     }

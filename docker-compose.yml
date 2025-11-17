@@ -19,7 +19,7 @@ services:
   server:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.server
     environment:
       DATABASE_URL: postgres://postgres:postgres@db:5432/chronosched?sslmode=disable
     depends_on:
@@ -31,13 +31,13 @@ services:
   worker:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.worker
     environment:
       DATABASE_URL: postgres://postgres:postgres@db:5432/chronosched?sslmode=disable
     depends_on:
       db:
         condition: service_healthy
-
+        
   demo:
     image: python:3.12-slim
     container_name: chronosched-demo
@@ -58,4 +58,3 @@ services:
         echo 'Running Chronosched demo client...' &&
         python demo_client.py
       "
-

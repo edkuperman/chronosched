@@ -1,0 +1,37 @@
+services:
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile.debug.server
+    ports:
+      - "8080:8080"
+      - "40000:40000"
+    volumes:
+      - ./cmd/server:/src/cmd/server:ro   # read-only source mount
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.debug.worker
+    ports:
+      - "40001:40001"
+    volumes:
+      - ./cmd/worker:/src/cmd/worker:ro   # read-only source mount
+
+  demo:
+    build:
+      context: ./client/python
+      dockerfile: Dockerfile.python
+    working_dir: /app
+    volumes:
+      - ./client/python:/app
+    environment:
+      PYTHONUNBUFFERED: "1"
+      CHRONOSCHED_BASE: http://server:8080
+    command: >
+      python -m debugpy
+        --listen 0.0.0.0:5678
+        --wait-for-client
+        demo_client.py
+    ports:
+      - "5678:5678"

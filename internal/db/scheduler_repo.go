@@ -23,18 +23,28 @@ func (r *SchedulerRepo) FairDequeue(ctx context.Context, n int, worker string, l
 	rows, err := tx.Query(ctx, `
 	WITH ranked AS (
 	  SELECT j.id, j.dag_id, j.priority, j.due_at,
-	         ROW_NUMBER() OVER (PARTITION BY j.dag_id ORDER BY j.priority DESC, j.due_at ASC, j.id) AS rnk
+	         ROW_NUMBER() OVER (
+	           PARTITION BY j.dag_id
+	           ORDER BY j.priority DESC, j.due_at ASC, j.id
+	         ) AS rnk
 	  FROM jobs j
 	  JOIN job_frontier f ON f.job_id = j.id AND f.ready = TRUE
-	  WHERE j.status = 'queued' AND j.due_at <= now()
+	  JOIN dags d         ON d.id = j.dag_id
+	  WHERE j.status = 'queued'
+	    AND j.due_at <= now()
+	    AND j.deleted = FALSE
+	    AND d.deleted = FALSE
 	)
-	SELECT id FROM ranked WHERE rnk = 1
+	SELECT id
+	FROM ranked
+	WHERE rnk = 1
 	ORDER BY priority DESC, due_at ASC
 	LIMIT $1
 	FOR UPDATE SKIP LOCKED;`, n)
 	if err != nil {
 		return nil, err
 	}
+
 	ids := make([]int64, 0)
 	for rows.Next() {
 		var id int64
@@ -52,8 +62,13 @@ func (r *SchedulerRepo) FairDequeue(ctx context.Context, n int, worker string, l
 
 	leaseUntil := time.Now().Add(lease)
 	_, err = tx.Exec(ctx, `
-	UPDATE jobs SET status='running', lease_owner=$1, lease_until=$2, started_at=COALESCE(started_at, now())
-	WHERE id = ANY($3);`, worker, leaseUntil, ids)
+	UPDATE jobs
+	SET status='running',
+	    lease_owner=$1,
+	    lease_until=$2,
+	    started_at=COALESCE(started_at, now())
+	WHERE id = ANY($3);`,
+		worker, leaseUntil, ids)
 	if err != nil {
 		return nil, err
 	}
@@ -63,3 +78,4 @@ func (r *SchedulerRepo) FairDequeue(ctx context.Context, n int, worker string, l
 	}
 	return ids, nil
 }
+
