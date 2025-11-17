@@ -1,177 +1,57 @@
 # Chronosched
 
-Chronosched is a lightweight, namespaced, DAG‑driven job scheduler with:
+Chronosched is a lightweight, namespaced, versioned DAG scheduler with:
 
-- Immutable, versioned job definitions
-- Namespace-scoped DAGs
+- Immutable job definitions (versioned)
+- Namespace-scoped DAGs (versioned)
 - Job dependency graphs with cycle protection
-- Frontier-driven scheduling
+- Frontier-driven execution scheduling
 - Optional cron scheduling via `cron_spec`
-- Independent workers for job execution
-- PostgreSQL as the source of truth
-- Fully observable via REST API
+- Independent worker process (leases jobs, executes payloads)
+- PostgreSQL as the single source of truth
+- REST API for all management operations
 
-This README matches the current codebase and router.go exactly.
+This README matches the current `router.go`, handlers, and the working demo client.
 
----
+--- 
 
-## Project Structure
+## Project Layout
 
 ```
 chronosched/
 │
 ├── cmd/
-│   ├── server/         # Go API server
-│   └── worker/         # Go worker
+│   ├── server/
+│   └── worker/
+│
+├── internal/
+│   ├── api/
+│   ├── db/
+│   ├── scheduler/
+│   └── util/
 │
 ├── client/
-│   └── python/         # Python demo client
+│   └── python/
 │
 ├── scripts/
-│   ├── run-prod.ps1
-│   ├── run-debug.ps1
-│   ├── run-prod.sh
-│   ├── run-debug.sh
 │
 ├── docker-compose.yml
 ├── docker-compose.debug.yml
-└── Dockerfile.*        # Server, Worker, Debug versions
+└── Dockerfile-server / Dockerfile-worker
 ```
 
 ---
 
-# API Endpoints (Router‑Accurate)
+## Running Chronosched
 
-/healthz is unversioned.
+### Production
 
-All other endpoints live under:
-
-```
-/api/v1
-```
-
----
-
-# Namespaces
-
-### Collection
-- **GET**  `/api/v1/namespaces/`
-- **POST** `/api/v1/namespaces/`
-
-### Single namespace (by name)
-- **GET**    `/api/v1/namespace/{name}/`
-- **PUT**    `/api/v1/namespace/{name}/`
-- **DELETE** `/api/v1/namespace/{name}/`
-
----
-
-# DAGs
-
-### DAG collection (per namespace)
-- **GET**  `/api/v1/dags/{namespace_id}/`
-- **POST** `/api/v1/dags/{namespace_id}/`
-- **PUT**  `/api/v1/dags/{namespace_id}/`
-
-### Single DAG
-- **GET**    `/api/v1/dags/{namespace_id}/{id}/`
-- **PUT**    `/api/v1/dags/{namespace_id}/{id}/`
-- **DELETE** `/api/v1/dags/{namespace_id}/{id}/`
-
----
-
-# Job Definitions
-
-### Collection
-- **GET**  `/api/v1/definitions/{namespace_id}/`
-- **POST** `/api/v1/definitions/{namespace_id}/`
-- **PUT**  `/api/v1/definitions/{namespace_id}/`
-
-### Single definition
-- **GET**    `/api/v1/definitions/{namespace_id}/{id}/`
-- **PUT**    `/api/v1/definitions/{namespace_id}/{id}/`
-- **DELETE** `/api/v1/definitions/{namespace_id}/{id}/`
-
-Each job definition may include:
-
-- `name`
-- `version`
-- `kind`
-- `payload_template`
-- `cron_spec` (optional, enabled)
-
----
-
-# Jobs (Inside a DAG)
-
-### Collection
-- **GET**  `/api/v1/dags/{namespace_id}/{dag_id}/jobs/`
-- **POST** `/api/v1/dags/{namespace_id}/{dag_id}/jobs/`
-- **PUT**  `/api/v1/dags/{namespace_id}/{dag_id}/jobs/`
-
-### Single job
-- **GET**    `/api/v1/dags/{namespace_id}/{dag_id}/jobs/{id}/`
-- **PUT**    `/api/v1/dags/{namespace_id}/{dag_id}/jobs/{id}/`
-- **DELETE** `/api/v1/dags/{namespace_id}/{dag_id}/jobs/{id}/`
-
----
-
-# Global Job Lifecycle Endpoints
-
-Base path:
-
-```
-/api/v1/jobs/{namespace_id}/{jobId}
-```
-
-Operations:
-
-- **POST** `/complete`
-- **POST** `/fail`
-- **DELETE** `/`
-
----
-
-# Dependencies
-
-Path:
-
-```
-/api/v1/dags/{namespace_id}/{dag_id}/dependencies
-```
-
-### Bulk operations
-- **GET**  `/`
-- **POST** `/`   (bulk create)
-- **PUT**  `/`   (bulk upsert)
-
-### Single dependency
-- **PATCH** `/`
-- **DELETE** `/`
-(requires `parent_id` and `child_id` query params)
-
----
-
-# Admin
-
-- **GET**  `/api/v1/admin/check/global-cycles`
-- **POST** `/api/v1/admin/prune`
-
----
-
-# Running Chronosched
-
-Scripts in `./scripts` provide easy workflows.
-
----
-
-## Production Mode
-
-### Windows
+Windows PowerShell:
 ```
 ./scripts/run-prod.ps1
 ```
 
-### Linux/macOS/WSL
+Linux/macOS/WSL:
 ```
 ./scripts/run-prod.sh
 ```
@@ -183,14 +63,14 @@ docker compose up --build
 
 ---
 
-## Debug Mode (Delve + debugpy)
+## Debug Mode
 
-### Windows
+Windows:
 ```
 ./scripts/run-debug.ps1
 ```
 
-### Linux/macOS/WSL
+Linux/macOS/WSL:
 ```
 ./scripts/run-debug.sh
 ```
@@ -201,36 +81,124 @@ docker compose -f docker-compose.yml -f docker-compose.debug.yml up --build
 ```
 
 ### Debug Ports
-
-- Go Server: **40000**
-- Go Worker: **40001**
-- Python demo: **5678**
-
-Use VS Code launch configurations to attach.
+- Server: 40000
+- Worker: 40001
+- Python demo: 5678
 
 ---
 
-# Python Demo Client
+## API Overview
 
-Location:
+All API paths except `/healthz` live under `/api/v1`.
 
+### Health
 ```
-client/python/
-```
-
-Environment variable:
-
-```
-CHRONOSCHED_BASE=http://server:8080
+GET /healthz
 ```
 
-Run locally:
-
+### Namespaces
 ```
-cd client/python
-pip install -r requirements.txt
+GET  /api/v1/namespaces
+POST /api/v1/namespaces
+GET  /api/v1/namespace/{name}
+PUT  /api/v1/namespace/{name}
+DELETE /api/v1/namespace/{name}
+```
+
+### DAGs
+```
+GET  /api/v1/dags/{namespace_id}
+POST /api/v1/dags/{namespace_id}
+GET  /api/v1/dags/{namespace_id}/{dag_id}
+PUT  /api/v1/dags/{namespace_id}/{dag_id}
+DELETE /api/v1/dags/{namespace_id}/{dag_id}
+```
+
+### Definitions
+```
+GET  /api/v1/definitions/{namespace_id}
+POST /api/v1/definitions/{namespace_id}
+GET  /api/v1/definitions/{namespace_id}/{def_id}
+PUT  /api/v1/definitions/{namespace_id}/{def_id}
+DELETE /api/v1/definitions/{namespace_id}/{def_id}
+```
+
+Response shape:
+```json
+{
+  "results": [ ... ]
+}
+```
+
+### Jobs
+```
+GET  /api/v1/dags/{namespace_id}/{dag_id}/jobs
+POST /api/v1/dags/{namespace_id}/{dag_id}/jobs
+GET  /api/v1/dags/{namespace_id}/{dag_id}/jobs/{job_id}
+PUT  /api/v1/dags/{namespace_id}/{dag_id}/jobs/{job_id}
+DELETE /api/v1/dags/{namespace_id}/{dag_id}/jobs/{job_id}
+```
+
+### Worker Lifecycle
+```
+POST   /api/v1/jobs/{namespace_id}/{job_id}/complete
+POST   /api/v1/jobs/{namespace_id}/{job_id}/fail
+DELETE /api/v1/jobs/{namespace_id}/{job_id}
+```
+
+### Dependencies
+```
+GET    /api/v1/dags/{namespace_id}/{dag_id}/dependencies
+POST   /api/v1/dags/{namespace_id}/{dag_id}/dependencies
+PUT    /api/v1/dags/{namespace_id}/{dag_id}/dependencies
+PATCH  /api/v1/dags/{namespace_id}/{dag_id}/dependencies?parent_id=X&child_id=Y
+DELETE /api/v1/dags/{namespace_id}/{dag_id}/dependencies?parent_id=X&child_id=Y
+```
+
+### Admin
+```
+GET  /api/v1/admin/check/global-cycles
+POST /api/v1/admin/prune
+```
+
+---
+
+## Cron Scheduling
+
+Definitions may include:
+
+```json
+{
+  "cron_spec": "*/5 * * * * *"
+}
+```
+
+Scheduler reloads cron definitions:
+- At startup
+- Whenever new definitions are created (`createDefinitions` triggers reload)
+
+---
+
+## Python Demo Client
+
+Located at:
+```
+client/python/demo_client.py
+```
+
+Run with:
+```
 python3 demo_client.py
 ```
+
+Demo steps:
+1. `/healthz`
+2. Create namespace
+3. Non-cron DAG test
+4. Worker executes jobs
+5. Cron definition test
+6. Scheduler enqueues jobs
+7. Demo verifies >= 2 cron jobs
 
 ---
 
