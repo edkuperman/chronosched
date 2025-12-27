@@ -1,92 +1,40 @@
 package dag
 
-import (
-	"context"
-
-	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/google/uuid"
-)
-
+// Edge represents a directed edge in a DAG from From -> To.
 type Edge struct {
-	Src string
-	Dst string
+	From string
+	To   string
 }
 
-type IEdges interface {
-	Edges(ctx context.Context, dagID string) ([]Edge, error)
-}
-
-type EdgeCache []Edge
-
-func (m EdgeCache) Edges(ctx context.Context, dagID string) ([]Edge, error) {
-	return m, nil
-}
-
-type DBEdges struct {
-	DB *pgxpool.Pool
-}
-
-func (s *DBEdges) Edges(ctx context.Context, dagID string) ([]Edge, error) {
-	dagUUID, err := uuid.Parse(dagID)
-	if err != nil {
-		return nil, err
-	}
-	rows, err := s.DB.Query(ctx, `SELECT src, dst FROM dag_edges WHERE dag_id=$1`, dagUUID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var out []Edge
-	for rows.Next() {
-		var e Edge
-		if err := rows.Scan(&e.Src, &e.Dst); err != nil {
-			return nil, err
-		}
-		out = append(out, e)
-	}
-	return out, nil
-}
-
-type ICycleDetector interface {
-	DetectCycles(ctx context.Context, src IEdges, dagID string) ([][]string, error)
-	HasCycle(ctx context.Context, src IEdges, dagID string) (bool, error)
-}
-
-type DFSDetector struct{}
-
-// DetectCycles finds all cycles and returns their node paths.
-func (DFSDetector) DetectCycles(ctx context.Context, src IEdges, dagID string) ([][]string, error) {
-	edges, err := src.Edges(ctx, dagID)
-	if err != nil {
-		return nil, err
-	}
-
+// DetectCycles runs a DFS-based cycle detection over the given directed edges.
+// It returns a slice of cycles, where each cycle is represented as a slice
+// of node IDs (strings) in order along the cycle.
+func DetectCycles(edges []Edge) [][]string {
+	// Build adjacency list.
 	graph := make(map[string][]string)
 	for _, e := range edges {
-		graph[e.Src] = append(graph[e.Src], e.Dst)
-		if _, ok := graph[e.Dst]; !ok {
-			graph[e.Dst] = nil
+		graph[e.From] = append(graph[e.From], e.To)
+		if _, ok := graph[e.To]; !ok {
+			graph[e.To] = nil
 		}
 	}
 
-	var (
-		cycles  [][]string
-		visited = map[string]bool{}
-		stack   = map[string]bool{}
-		path    []string
-	)
+	visited := make(map[string]bool)
+	stack := make(map[string]bool)
+	var path []string
+	var cycles [][]string
 
-	var dfs func(string)
-	dfs = func(n string) {
-		visited[n] = true
-		stack[n] = true
-		path = append(path, n)
+	var dfs func(node string)
+	dfs = func(node string) {
+		visited[node] = true
+		stack[node] = true
+		path = append(path, node)
 
-		for _, next := range graph[n] {
+		for _, next := range graph[node] {
 			if !visited[next] {
 				dfs(next)
 			} else if stack[next] {
+				// Found a back-edge -> cycle. Extract cycle from path.
 				start := 0
 				for i, v := range path {
 					if v == next {
@@ -94,13 +42,14 @@ func (DFSDetector) DetectCycles(ctx context.Context, src IEdges, dagID string) (
 						break
 					}
 				}
-				cycle := append([]string(nil), path[start:]...)
-				cycles = append(cycles, append(cycle, next))
+				cycle := append([]string{}, path[start:]...)
+				cycles = append(cycles, cycle)
 			}
 		}
 
-		stack[n] = false
+		// pop from path and stack
 		path = path[:len(path)-1]
+		stack[node] = false
 	}
 
 	for node := range graph {
@@ -109,11 +58,10 @@ func (DFSDetector) DetectCycles(ctx context.Context, src IEdges, dagID string) (
 		}
 	}
 
-	return cycles, nil
+	return cycles
 }
 
-func (DFSDetector) HasCycle(ctx context.Context, src IEdges, dagID string) (bool, error) {
-	cycles, err := DFSDetector{}.DetectCycles(ctx, src, dagID)
-	return len(cycles) > 0, err
+// HasCycle reports whether the given edges contain at least one cycle.
+func HasCycle(edges []Edge) bool {
+	return len(DetectCycles(edges)) > 0
 }
-

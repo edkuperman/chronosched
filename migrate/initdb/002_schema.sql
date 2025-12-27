@@ -189,6 +189,20 @@ FOR EACH ROW
 WHEN (NEW.status = 'succeeded')
 EXECUTE FUNCTION frontier_mark_children_ready();
 
+-- job_queue for worker gateway
+
+CREATE TABLE IF NOT EXISTS job_queue (
+  id             BIGSERIAL PRIMARY KEY,
+  job_id         BIGINT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+  available_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  priority       INT NOT NULL DEFAULT 0,
+  attempts       INT NOT NULL DEFAULT 0,
+  reserved_until TIMESTAMPTZ,
+  consumer_id    TEXT,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- INDEXES
 
 CREATE INDEX idx_jobs_dag ON jobs(dag_id);
@@ -204,3 +218,8 @@ CREATE INDEX idx_definitions_cron ON job_definitions(cron_spec)
 CREATE INDEX idx_job_deps_dag ON job_dependencies(dag_id);
 CREATE INDEX idx_job_deps_parent ON job_dependencies(parent_job_id);
 CREATE INDEX idx_job_deps_child ON job_dependencies(child_job_id);
+
+CREATE INDEX IF NOT EXISTS idx_job_queue_available ON job_queue(available_at);
+CREATE INDEX IF NOT EXISTS idx_job_queue_reserved ON job_queue(reserved_until);
+CREATE INDEX IF NOT EXISTS idx_job_queue_priority ON job_queue(priority DESC, available_at);
+

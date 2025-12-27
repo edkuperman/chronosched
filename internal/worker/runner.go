@@ -1,233 +1,111 @@
 package worker
 
 import (
+	"bytes"
 	"context"
-	"fmt"
-	"log"
-	"os"
-	"sync"
+	"encoding/json"
+	"io"
+	"net/http"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/edkuperman/chronosched/internal/logger"
 
-	"github.com/edkuperman/chronosched/internal/db"
+	"github.com/edkuperman/chronosched/internal/repository"
 )
 
-// Runner executes jobs in parallel, periodically polling the database for ready jobs.
 type Runner struct {
-	DB     *pgxpool.Pool
-	Jobs   *db.JobRepo
-	WorkerID string
-
-	// tuning parameters
-	PollEvery      time.Duration // how often to call DequeueReady
-	MaxBatch       int           // max jobs dequeued per poll
-	Concurrency    int           // max concurrent workers
-	LeaseDuration  time.Duration // job lease time
-	HeartbeatEvery time.Duration // lease renewal frequency
-
-	// internal
-	muRunning sync.Mutex
-	running   map[int64]struct{}
+	BaseURL   string
+	WorkerID  string
+	Client    *http.Client
+	PollEvery time.Duration
 }
 
-// Run launches the polling loop and worker goroutines.
+func NewRunner(baseURL, workerID string) *Runner {
+	return &Runner{
+		BaseURL:   baseURL,
+		WorkerID:  workerID,
+		Client:    &http.Client{Timeout: 10 * time.Second},
+		PollEvery: 2 * time.Second,
+	}
+}
+
 func (r *Runner) Run(ctx context.Context) error {
-	if r.Jobs == nil {
-		r.Jobs = db.NewJobRepo(r.DB)
-	}
-	if r.WorkerID == "" {
-		r.WorkerID = defaultWorkerID()
-	}
-	if r.PollEvery == 0 {
-		r.PollEvery = 800 * time.Millisecond
-	}
-	if r.MaxBatch <= 0 {
-		r.MaxBatch = 8
-	}
-	if r.Concurrency <= 0 {
-		r.Concurrency = 4
-	}
-	if r.LeaseDuration <= 0 {
-		r.LeaseDuration = 10 * time.Minute
-	}
-	if r.HeartbeatEvery <= 0 {
-		r.HeartbeatEvery = 30 * time.Second
-	}
-
-	log.Printf("[worker %s] starting (poll=%s, batch=%d, conc=%d, lease=%s)",
-		r.WorkerID, r.PollEvery, r.MaxBatch, r.Concurrency, r.LeaseDuration)
-
-	jobsCh := make(chan db.Job)
-	resultsCh := make(chan result)
-	sem := make(chan struct{}, r.Concurrency)
-	r.running = make(map[int64]struct{})
-
-	// 1. Poller: periodically fetch ready jobs
-	pollCtx, pollCancel := context.WithCancel(ctx)
-	go r.poller(pollCtx, jobsCh)
-
-	// 2. Heartbeater: periodically renew leases for running jobs
-	hbCtx, hbCancel := context.WithCancel(ctx)
-	go r.heartbeater(hbCtx)
-
-	// 3. Worker fan-out
-	var wg sync.WaitGroup
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case j, ok := <-jobsCh:
-				if !ok {
-					return
-				}
-				sem <- struct{}{}
-				wg.Add(1)
-				r.trackStart(j.ID)
-				go func(job db.Job) {
-					defer wg.Done()
-					defer func() { <-sem }()
-					defer r.trackEnd(job.ID)
-
-					if err := r.execute(ctx, job); err != nil {
-						log.Printf("[worker %s] job %d FAILED: %v", r.WorkerID, job.ID, err)
-						resultsCh <- result{jobID: job.ID, err: err}
-						return
-					}
-					resultsCh <- result{jobID: job.ID, err: nil}
-				}(j)
-			}
-		}
-	}()
-
-	// 4. Results handler: update job status
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case res, ok := <-resultsCh:
-				if !ok {
-					return
-				}
-				if res.err != nil {
-					_ = r.Jobs.MarkFail(ctx, res.jobID, res.err.Error())
-				} else {
-					_ = r.Jobs.MarkComplete(ctx, res.jobID)
-				}
-			}
-		}
-	}()
-
-	// === Shutdown ===
-	<-ctx.Done()
-	log.Printf("[worker %s] shutting down...", r.WorkerID)
-	pollCancel()
-	hbCancel()
-	close(jobsCh)
-	wg.Wait()
-	close(resultsCh)
-	log.Printf("[worker %s] stopped", r.WorkerID)
-	return nil
-}
-
-// poller periodically fetches ready jobs.
-func (r *Runner) poller(ctx context.Context, jobsCh chan<- db.Job) {
 	ticker := time.NewTicker(r.PollEvery)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return ctx.Err()
 		case <-ticker.C:
-			jobs, err := r.Jobs.DequeueReady(ctx, r.MaxBatch, r.WorkerID, r.LeaseDuration)
-			if err != nil {
-				log.Printf("[worker %s] DequeueReady error: %v", r.WorkerID, err)
-				continue
-			}
-			for _, j := range jobs {
-				select {
-				case jobsCh <- j:
-				case <-ctx.Done():
-					return
-				}
+			if err := r.pollOnce(ctx); err != nil {
+				logger.Error(err, "worker poll error")
 			}
 		}
 	}
 }
 
-// heartbeater extends leases for in-flight jobs.
-func (r *Runner) heartbeater(ctx context.Context) {
-	t := time.NewTicker(r.HeartbeatEvery)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			ids := r.snapshotRunning()
-			if len(ids) == 0 {
-				continue
-			}
-			_, err := r.DB.Exec(ctx, `
-				UPDATE jobs
-				   SET heartbeat_at = now(),
-				       lease_until = now() + $2::interval
-				 WHERE id = ANY($1)
-				   AND status = 'running'
-				   AND lease_owner = $3;
-			`, ids, r.LeaseDuration.String(), r.WorkerID)
-			if err != nil {
-				log.Printf("[worker %s] heartbeat error: %v", r.WorkerID, err)
-			}
-		}
-	}
+type leaseRequest struct {
+	WorkerID string `json:"worker_id"`
+	MaxJobs  int    `json:"max_jobs"`
 }
 
-// execute dispatches job execution based on its Kind.
-func (r *Runner) execute(ctx context.Context, j db.Job) error {
-	switch j.Kind {
-	case "http":
-		return r.execHTTP(ctx, j)
-	case "binary":
-		return r.execBinary(ctx, j)
-	default:
-		return fmt.Errorf("unknown job kind: %s", j.Kind)
-	}
+type leaseResponse struct {
+	Items []repository.QueueItem `json:"items"`
 }
 
-// internal tracking helpers
-func (r *Runner) trackStart(id int64) {
-	r.muRunning.Lock()
-	r.running[id] = struct{}{}
-	r.muRunning.Unlock()
-}
-func (r *Runner) trackEnd(id int64) {
-	r.muRunning.Lock()
-	delete(r.running, id)
-	r.muRunning.Unlock()
-}
-func (r *Runner) snapshotRunning() []int64 {
-	r.muRunning.Lock()
-	defer r.muRunning.Unlock()
-	out := make([]int64, 0, len(r.running))
-	for id := range r.running {
-		out = append(out, id)
+func (r *Runner) pollOnce(ctx context.Context) error {
+	reqBody, _ := json.Marshal(leaseRequest{
+		WorkerID: r.WorkerID,
+		MaxJobs:  4,
+	})
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, r.BaseURL+"/internal/workers/lease", bytes.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := r.Client.Do(req)
+	if err != nil {
+		return err
 	}
-	return out
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		io.ReadAll(resp.Body)
+		return nil // TODO: log and ignore
+	}
+
+	var lr leaseResponse
+	if err := json.NewDecoder(resp.Body).Decode(&lr); err != nil {
+		return err
+	}
+	for _, item := range lr.Items {
+		go r.executeJob(ctx, item)
+	}
+	return nil
 }
 
-type result struct {
-	jobID int64
-	err   error
+type resultRequest struct {
+	WorkerID string `json:"worker_id"`
+	QueueID  int64  `json:"queue_id"`
+	JobID    int64  `json:"job_id"`
+	Success  bool   `json:"success"`
+	Error    string `json:"error"`
 }
 
-func defaultWorkerID() string {
-	if id := os.Getenv("WORKER_ID"); id != "" {
-		return id
+func (r *Runner) executeJob(ctx context.Context, item repository.QueueItem) {
+	// For now, just mark as succeeded immediately. In a real implementation,
+	// this would fetch job details and execute the payload.
+	reqBody, _ := json.Marshal(resultRequest{
+		WorkerID: r.WorkerID,
+		QueueID:  item.QueueID,
+		JobID:    item.JobID,
+		Success:  true,
+	})
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, r.BaseURL+"/internal/workers/result", bytes.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := r.Client.Do(req)
+	if err != nil {
+		logger.Error(err, "report result error")
+		return
 	}
-	h, _ := os.Hostname()
-	return fmt.Sprintf("%s-%d", h, os.Getpid())
+	resp.Body.Close()
 }

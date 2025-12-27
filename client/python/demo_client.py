@@ -83,17 +83,17 @@ def create_and_run_non_cron_demo(namespace_id: str):
         {
             "name": "Root",
             "kind": "cmd",
-            "payload_template": json.dumps({"cmd": "echo ROOT"}),
+            "payload_template": {"cmd": "echo ROOT"},
         },
         {
             "name": "Child5s",
             "kind": "cmd",
-            "payload_template": json.dumps({"cmd": "echo CHILD && sleep 5"}),
+            "payload_template": {"cmd": "echo CHILD && sleep 5"},
         },
         {
             "name": "Leaf",
             "kind": "cmd",
-            "payload_template": json.dumps({"cmd": "echo LEAF"}),
+            "payload_template": {"cmd": "echo LEAF"},
         },
     ]
 
@@ -142,7 +142,7 @@ def test_scheduler(namespace_id: str):
         {
             "name": "ScheduledTest",
             "kind": "cmd",
-            "payload_template": json.dumps({"cmd": "echo CRON_TEST"}),
+            "payload_template": {"cmd": "echo CRON_TEST"},
             "cron_spec": "*/5 * * * * *",  # every 5 seconds
         }
     ]

@@ -2,182 +2,96 @@ package scheduler
 
 import (
 	"context"
-	"log"
+	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/robfig/cron/v3"
 
-	"github.com/edkuperman/chronosched/internal/db"
+	"github.com/edkuperman/chronosched/internal/logger"
+	"github.com/edkuperman/chronosched/internal/repository"
 )
 
-// Scheduler wires CRON-based scheduling of job definitions into DAG-scoped jobs.
-//
-// Model:
-//   - Source of truth for schedules is job_definitions.cron_spec
-//   - Every scheduled execution is enqueued as a job in an existing DAG
-//   - Scheduler never creates special "cron DAGs"; it uses the DAG that matches
-//     the definition's (namespace, name), picking the latest non-deleted version.
+// Scheduler is a lightweight time-based scheduler that promotes
+// ready jobs from 'waiting' to 'queued' and enqueues them onto
+// the worker queue. It is intentionally simple and built entirely
+// on repository interfaces so that the storage layer remains abstract.
 type Scheduler struct {
-	dbPool *pgxpool.Pool
-	cron   *cron.Cron
+	repos     *repository.Repos
+	cron      *cron.Cron
+	batchSize int
 }
 
-// New constructs a Scheduler. Typically used from cmd/server/main.go:
-//
-//   sched := scheduler.New(h.JobRepo(), pool)
-//   if err := sched.LoadAndRegister(ctx); err != nil { ... }
-//   go sched.Start()
-//
-func New(_ *db.JobRepo, pool *pgxpool.Pool) *Scheduler {
+// NewScheduler constructs a Scheduler with sane defaults.
+// It wires a cron entry that runs every 5 seconds and calls
+// the internal tick() method.
+func NewScheduler(repos *repository.Repos) *Scheduler {
 	c := cron.New(cron.WithSeconds())
-	return &Scheduler{
-		dbPool: pool,
-		cron:   c,
+
+	s := &Scheduler{
+		repos:     repos,
+		cron:      c,
+		batchSize: 128,
 	}
+
+	// Drive the scheduler tick every 5 seconds.
+	// '@every' syntax is supported by robfig/cron.
+	_, err := c.AddFunc("@every 5s", func() {
+		ctx := context.Background()
+		if err := s.tick(ctx); err != nil {
+			logger.Error(err, "scheduler tick error")
+		}
+	})
+	if err != nil {
+		logger.Error(err, "failed to register scheduler cron entry")
+	}
+
+	return s
 }
 
-// scheduledDefinition is a view of a cron-enabled job definition.
-type scheduledDefinition struct {
-	DefID       string
-	NamespaceID string
-	Name        string
-	PayloadJSON string
-	CronSpec    string
+// Run starts the underlying cron scheduler and blocks until the
+// provided context is cancelled.
+func (s *Scheduler) Run(ctx context.Context) error {
+	s.cron.Start()
+	defer s.cron.Stop()
+
+	// Optional initial tick on startup so we don't wait for the first 5s interval.
+	if err := s.tick(ctx); err != nil && ctx.Err() == nil {
+		logger.Error(err, "scheduler initial tick error")
+	}
+
+	<-ctx.Done()
+	return ctx.Err()
 }
 
-// LoadAndRegister scans cron-enabled definitions and registers cron jobs
-// with robfig/cron. Each cron callback enqueues a DAG-scoped job.
-func (s *Scheduler) LoadAndRegister(ctx context.Context) error {
-	const q = `
-		SELECT
-			def_id::text,
-			namespace::text,
-			name,
-			payload_template::text,
-			cron_spec
-		FROM job_definitions
-		WHERE deleted = FALSE
-		  AND cron_spec IS NOT NULL
-		  AND trim(cron_spec) <> ''
-	`
+// tick performs a single scheduling pass:
+//   - find up to batchSize jobs that are in 'waiting' status
+//     and due_at <= now
+//   - mark them 'queued'
+//   - enqueue them into the job_queue via QueueRepository
+func (s *Scheduler) tick(ctx context.Context) error {
+	now := time.Now()
 
-	rows, err := s.dbPool.Query(ctx, q)
+	// Find jobs that are ready to run.
+	jobs, err := s.repos.Jobs.FindDueWaiting(ctx, now, s.batchSize)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	if len(jobs) == 0 {
+		return nil
+	}
 
-	registered := 0
-
-	for rows.Next() {
-		var d scheduledDefinition
-		if err := rows.Scan(
-			&d.DefID,
-			&d.NamespaceID,
-			&d.Name,
-			&d.PayloadJSON,
-			&d.CronSpec,
-		); err != nil {
-			return err
-		}
-
-		if d.PayloadJSON == "" || d.PayloadJSON == "null" {
-			d.PayloadJSON = "{}"
-		}
-
-		defCopy := d // avoid closure capturing loop variable
-
-		_, err := s.cron.AddFunc(d.CronSpec, func() {
-			s.enqueueScheduledJob(context.Background(), defCopy)
-		})
-		if err != nil {
-			log.Printf("scheduler: failed to register cron for def %s (%s): %v",
-				d.Name, d.DefID, err)
+	for _, j := range jobs {
+		// Best-effort handling for each job; we log and continue
+		// on errors so that one bad job does not block others.
+		if err := s.repos.Jobs.MarkQueued(ctx, j.ID); err != nil {
+			logger.Error(err, "scheduler failed to mark job queued", "jobID", j.ID)
 			continue
 		}
-
-		registered++
+		if err := s.repos.Queue.Enqueue(ctx, j.ID, j.DueAt, j.Priority); err != nil {
+			logger.Error(err, "scheduler failed to enqueue job", "jobID", j.ID)
+			continue
+		}
+		logger.Info("scheduler enqueued job", "jobID", j.ID, "dagID", j.DagID, "defID", j.DefID)
 	}
 
-	if err := rows.Err(); err != nil {
-		return err
-	}
-
-	log.Printf("scheduler: registered %d cron definition(s)", registered)
 	return nil
-}
-
-// enqueueScheduledJob is invoked by robfig/cron callbacks.
-//
-// It finds the *existing* DAG in the definition's namespace with the same
-// name as the definition (latest non-deleted version), and enqueues a job
-// in that DAG using the definition's payload template.
-func (s *Scheduler) enqueueScheduledJob(ctx context.Context, def scheduledDefinition) {
-	// 1. Look up the DAG for this definition: (namespace, name), latest version, not deleted.
-	const selectDAG = `
-		SELECT id::text
-		FROM dags
-		WHERE namespace = $1
-		  AND name = $2
-		  AND deleted = FALSE
-		ORDER BY version DESC
-		LIMIT 1
-	`
-
-	var dagID string
-	if err := s.dbPool.QueryRow(ctx, selectDAG, def.NamespaceID, def.Name).Scan(&dagID); err != nil {
-		log.Printf("scheduler: no DAG found for cron def %s (%s) in namespace %s: %v",
-			def.Name, def.DefID, def.NamespaceID, err)
-		return
-	}
-
-	payload := def.PayloadJSON
-	if payload == "" || payload == "null" {
-		payload = "{}"
-	}
-
-	const status = "queued"
-	const priority = 0
-
-	const insertJob = `
-		INSERT INTO jobs (
-			dag_id,
-			def_id,
-			status,
-			priority,
-			due_at,
-			payload_json
-		)
-		VALUES (
-			$1,
-			$2,
-			$3,
-			$4,
-			now(),
-			$5::jsonb
-		)
-		RETURNING id
-	`
-
-	var jobID int64
-	if err := s.dbPool.QueryRow(ctx, insertJob, dagID, def.DefID, status, priority, payload).Scan(&jobID); err != nil {
-		log.Printf("scheduler: insert job error for def %s: %v", def.DefID, err)
-		return
-	}
-
-	// Initialize frontier: if the job has no parents, it becomes ready immediately.
-	_, _ = s.dbPool.Exec(ctx, `SELECT init_frontier_for_job($1, $2)`, jobID, dagID)
-
-	log.Printf("scheduler: enqueued scheduled job id=%d for def %s (%s) in DAG %s",
-		jobID, def.Name, def.DefID, dagID)
-}
-
-// Start begins executing registered cron schedules.
-func (s *Scheduler) Start() {
-	s.cron.Start()
-}
-
-// Stop stops the scheduler and waits for any running jobs to finish.
-func (s *Scheduler) Stop() {
-	<-s.cron.Stop().Done()
 }
