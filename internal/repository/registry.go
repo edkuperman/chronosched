@@ -2,11 +2,11 @@ package repository
 
 // Repos aggregates all repository interfaces used by higher layers.
 type Repos struct {
-    Namespaces NamespaceRepository
-    DAGs       DAGRepository
-    Definitions JobDefinitionRepository
-    Jobs       JobRepository
-    Queue      QueueRepository
-    Deps       DependencyRepository
-    Admin      AdminRepository
+	Namespaces  NamespaceRepository
+	Definitions JobDefinitionRepository
+	DAGs        DAGRepository
+	Runs        RunRepository
+	Jobs        JobRepository
+	Queue       QueueRepository
+	Admin       AdminRepository
 }

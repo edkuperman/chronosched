@@ -28,33 +28,41 @@ services:
     ports:
       - "8080:8080"
 
-  worker:
+  scheduler:
     build:
       context: .
-      dockerfile: Dockerfile.worker
+      dockerfile: Dockerfile.scheduler
     environment:
       DATABASE_URL: postgres://postgres:postgres@db:5432/chronosched?sslmode=disable
     depends_on:
       db:
         condition: service_healthy
-        
-  demo:
-    image: python:3.12-slim
-    container_name: chronosched-demo
-    working_dir: /app
-    volumes:
-      - ./client/python:/app
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    environment:
+      CHRONOSCHED_BASE_URL: http://server:8080
     depends_on:
       server:
         condition: service_started
+      scheduler:
+        condition: service_started
+
+  python-service:
+    build:
+      context: ./client/python
+      dockerfile: Dockerfile.python
     environment:
-      - PYTHONUNBUFFERED=1
-      - CHRONOSCHED_BASE=http://server:8080
-    command: >
-      sh -c "
-        echo 'Installing dependencies...' &&
-        sleep 5 &&
-        pip install --no-cache-dir -r requirements.txt &&
-        echo 'Running Chronosched demo client...' &&
-        python demo_client.py
-      "
+      PYTHONUNBUFFERED: "1"
+      CHRONOSCHED_BASE: http://server:8080
+      SERVICE_HOST: python-service
+      PORT: "8090"
+    depends_on:
+      server:
+        condition: service_started
+      scheduler:
+        condition: service_started
+    ports:
+      - "8090:8090"

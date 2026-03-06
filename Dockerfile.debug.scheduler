@@ -1,0 +1,39 @@
+# =========================
+# Build stage
+# =========================
+FROM golang:1.23 AS build
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN go build -gcflags "all=-N -l" -o scheduler ./cmd/scheduler
+
+
+# =========================
+# Delve build stage
+# =========================
+FROM golang:1.23 AS delve-build
+RUN apt-get update && apt-get install -y git make
+RUN git clone https://github.com/go-delve/delve.git /dlv
+WORKDIR /dlv
+RUN make build
+
+
+# =========================
+# Debug runtime stage
+# =========================
+FROM debian:bookworm
+
+RUN apt-get update && apt-get install -y ca-certificates
+
+WORKDIR /app
+
+COPY --from=build /src/scheduler /app/scheduler
+COPY --from=delve-build /dlv/dlv /usr/local/bin/dlv
+RUN chmod +x /usr/local/bin/dlv
+
+EXPOSE 40002
+
+CMD ["dlv", "exec", "/app/scheduler", "--headless", "--listen=:40002", "--api-version=2", "--accept-multiclient", "--check-go-version=false", "--continue", "--"]

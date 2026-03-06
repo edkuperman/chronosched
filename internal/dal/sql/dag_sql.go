@@ -1,119 +1,40 @@
 package sql
 
 import (
-    "context"
-
-    "github.com/edkuperman/chronosched/internal/repository"
+	"context"
+	"github.com/edkuperman/chronosched/internal/repository"
 )
 
-type DAGSQL struct {
-    dal *SQLDAL
-}
+type DAGSQL struct{ store *Store }
 
-func NewDAGSQL(dal *SQLDAL) *DAGSQL {
-    return &DAGSQL{dal: dal}
-}
-
+func NewDAGSQL(dal *SQLDAL) *DAGSQL { return &DAGSQL{store: NewStore(dal)} }
 func (d *DAGSQL) ListByNamespace(ctx context.Context, namespaceID string) ([]repository.DAG, error) {
-    const q = `
-SELECT id, namespace, name, version, created_at, deleted
-FROM dags
-WHERE namespace = $1
-ORDER BY name, version;
-`
-    rows, err := d.dal.DB.Query(ctx, q, namespaceID)
-    if err != nil {
-        return nil, err
-    }
-    defer rows.Close()
-
-    var res []repository.DAG
-    for rows.Next() {
-        var dag repository.DAG
-        if err := rows.Scan(&dag.ID, &dag.Namespace, &dag.Name, &dag.Version, &dag.CreatedAt, &dag.Deleted); err != nil {
-            return nil, err
-        }
-        res = append(res, dag)
-    }
-    if err := rows.Err(); err != nil {
-        return nil, err
-    }
-    return res, nil
+	return d.store.ListByNamespaceDAG(ctx, namespaceID)
 }
-
-func (d *DAGSQL) Create(ctx context.Context, namespaceID, name string, version int) (*repository.DAG, error) {
-    const q = `
-INSERT INTO dags (namespace, name, version)
-VALUES ($1, $2, $3)
-RETURNING id, namespace, name, version, created_at, deleted;
-`
-    var dag repository.DAG
-    err := d.dal.DB.QueryRow(ctx, q, namespaceID, name, version).Scan(
-        &dag.ID, &dag.Namespace, &dag.Name, &dag.Version, &dag.CreatedAt, &dag.Deleted,
-    )
-    if err != nil {
-        return nil, err
-    }
-    return &dag, nil
+func (d *DAGSQL) Create(ctx context.Context, namespaceID, name, description string) (*repository.DAG, error) {
+	return d.store.CreateDAG(ctx, namespaceID, name, description)
 }
-
-func (d *DAGSQL) Upsert(ctx context.Context, dag repository.DAG) (*repository.DAG, error) {
-    const q = `
-INSERT INTO dags (namespace, name, version)
-VALUES ($1, $2, $3)
-ON CONFLICT (namespace, name, version)
-DO UPDATE SET deleted = EXCLUDED.deleted
-RETURNING id, namespace, name, version, created_at, deleted;
-`
-    var out repository.DAG
-    err := d.dal.DB.QueryRow(ctx, q, dag.Namespace, dag.Name, dag.Version).Scan(
-        &out.ID, &out.Namespace, &out.Name, &out.Version, &out.CreatedAt, &out.Deleted,
-    )
-    if err != nil {
-        return nil, err
-    }
-    return &out, nil
+func (d *DAGSQL) Get(ctx context.Context, dagID string) (*repository.DAG, error) {
+	return d.store.GetDAG(ctx, dagID)
 }
-
-func (d *DAGSQL) Get(ctx context.Context, namespaceID, id string) (*repository.DAG, error) {
-    const q = `
-SELECT id, namespace, name, version, created_at, deleted
-FROM dags
-WHERE namespace = $1 AND id = $2;
-`
-    var dag repository.DAG
-    err := d.dal.DB.QueryRow(ctx, q, namespaceID, id).Scan(
-        &dag.ID, &dag.Namespace, &dag.Name, &dag.Version, &dag.CreatedAt, &dag.Deleted,
-    )
-    if err != nil {
-        return nil, err
-    }
-    return &dag, nil
+func (d *DAGSQL) Delete(ctx context.Context, dagID string) error {
+	return d.store.DeleteDAG(ctx, dagID)
 }
-
-func (d *DAGSQL) Update(ctx context.Context, dag repository.DAG) (*repository.DAG, error) {
-    const q = `
-UPDATE dags
-SET name = $3, version = $4, deleted = $5
-WHERE namespace = $1 AND id = $2
-RETURNING id, namespace, name, version, created_at, deleted;
-`
-    var out repository.DAG
-    err := d.dal.DB.QueryRow(ctx, q, dag.Namespace, dag.ID, dag.Name, dag.Version, dag.Deleted).Scan(
-        &out.ID, &out.Namespace, &out.Name, &out.Version, &out.CreatedAt, &out.Deleted,
-    )
-    if err != nil {
-        return nil, err
-    }
-    return &out, nil
+func (d *DAGSQL) CreateVersion(ctx context.Context, dagID string, input repository.DAGVersionCreateInput) (*repository.DAGVersion, error) {
+	return d.store.CreateVersion(ctx, dagID, input)
 }
-
-func (d *DAGSQL) Delete(ctx context.Context, namespaceID, id string) error {
-    const q = `
-UPDATE dags
-SET deleted = TRUE
-WHERE namespace = $1 AND id = $2;
-`
-    _, err := d.dal.DB.Exec(ctx, q, namespaceID, id)
-    return err
+func (d *DAGSQL) ListVersions(ctx context.Context, dagID string) ([]repository.DAGVersion, error) {
+	return d.store.ListVersions(ctx, dagID)
+}
+func (d *DAGSQL) GetVersion(ctx context.Context, dagVersionID string) (*repository.DAGVersion, error) {
+	return d.store.GetVersion(ctx, dagVersionID)
+}
+func (d *DAGSQL) ActivateVersion(ctx context.Context, dagVersionID string) error {
+	return d.store.ActivateVersion(ctx, dagVersionID)
+}
+func (d *DAGSQL) RevertVersion(ctx context.Context, dagVersionID string, activate bool, note string) (*repository.DAGVersion, error) {
+	return d.store.RevertVersion(ctx, dagVersionID, activate, note)
+}
+func (d *DAGSQL) GetVersionGraph(ctx context.Context, dagVersionID string) (*repository.DAGVersionGraph, error) {
+	return d.store.GetVersionGraph(ctx, dagVersionID)
 }

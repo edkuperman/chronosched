@@ -1,225 +1,174 @@
--- ENUMS
-CREATE TYPE job_status AS ENUM (
-  'waiting',
-  'queued',
-  'running',
-  'succeeded',
-  'failed',
-  'cancelled'
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+DROP TABLE IF EXISTS cron_fires CASCADE;
+DROP TABLE IF EXISTS cron_state CASCADE;
+DROP TABLE IF EXISTS job_queue CASCADE;
+DROP TABLE IF EXISTS job_frontier CASCADE;
+DROP TABLE IF EXISTS job_dependencies CASCADE;
+DROP TABLE IF EXISTS jobs CASCADE;
+DROP TABLE IF EXISTS dag_runs CASCADE;
+DROP TABLE IF EXISTS dag_version_edges CASCADE;
+DROP TABLE IF EXISTS dag_version_nodes CASCADE;
+DROP TABLE IF EXISTS dag_versions CASCADE;
+DROP TABLE IF EXISTS dags CASCADE;
+DROP TABLE IF EXISTS job_definitions CASCADE;
+DROP TABLE IF EXISTS namespaces CASCADE;
+DROP TYPE IF EXISTS run_status CASCADE;
+DROP TYPE IF EXISTS job_status CASCADE;
+
+CREATE TYPE run_status AS ENUM ('waiting','running','succeeded','failed','missed','cancelled');
+CREATE TYPE job_status AS ENUM ('waiting','queued','running','succeeded','failed','missed','cancelled','skipped');
+
+CREATE TABLE namespaces (
+  namespace_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name TEXT NOT NULL UNIQUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TYPE dependency_type AS ENUM (
-  'order-only',
-  'data'
-);
-
--- NAMESPACES
-CREATE TABLE IF NOT EXISTS namespaces (
-  namespace_id   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  name           TEXT NOT NULL UNIQUE,
-  created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-  deleted        BOOLEAN NOT NULL DEFAULT FALSE
-);
-
--- DAGs (Versioned)
-CREATE TABLE IF NOT EXISTS dags (
-  id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  namespace      UUID NOT NULL REFERENCES namespaces(namespace_id) ON DELETE CASCADE,
-  name           TEXT NOT NULL,
-  version        INT NOT NULL,
-  created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-  deleted        BOOLEAN NOT NULL DEFAULT FALSE,
-  UNIQUE(namespace, name, version)
-);
-
--- JOB DEFINITIONS
-CREATE TABLE IF NOT EXISTS job_definitions (
-  def_id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  namespace        UUID NOT NULL REFERENCES namespaces(namespace_id) ON DELETE CASCADE,
-  name             TEXT NOT NULL,
-  version          INT NOT NULL,
-  kind             TEXT NOT NULL CHECK (kind IN ('cmd', 'http', 'binary')),
+CREATE TABLE job_definitions (
+  definition_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  namespace_id UUID NOT NULL REFERENCES namespaces(namespace_id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  kind TEXT NOT NULL DEFAULT 'cmd',
   payload_template JSONB NOT NULL DEFAULT '{}'::jsonb,
-  cron_spec        TEXT,
-  delay_interval   INTERVAL,
-  created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-  deleted          BOOLEAN NOT NULL DEFAULT FALSE,
-  UNIQUE(namespace, name, version)
+  schedule_type TEXT,
+  cron_spec TEXT,
+  interval_seconds INT,
+  interval_start_at TIMESTAMPTZ,
+  timezone TEXT,
+  on_failure_policy TEXT NOT NULL DEFAULT 'continue',
+  is_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  is_paused BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(namespace_id, name),
+  CONSTRAINT chk_job_definitions_schedule CHECK (
+    schedule_type IS NULL
+    OR (schedule_type = 'cron' AND cron_spec IS NOT NULL AND btrim(cron_spec) <> '' AND interval_seconds IS NULL AND interval_start_at IS NULL)
+    OR (schedule_type = 'interval' AND interval_seconds IS NOT NULL AND interval_seconds > 0 AND interval_start_at IS NOT NULL AND (cron_spec IS NULL OR btrim(cron_spec) = ''))
+  )
 );
 
--- JOBS (Runtime Executions)
-CREATE TABLE IF NOT EXISTS jobs (
-  id             BIGSERIAL PRIMARY KEY,
-  dag_id         UUID NOT NULL REFERENCES dags(id) ON DELETE CASCADE,
-  def_id         UUID NOT NULL REFERENCES job_definitions(def_id),
-  version        INT NOT NULL DEFAULT 1,
-  deleted        BOOLEAN NOT NULL DEFAULT FALSE,
-  status         job_status NOT NULL DEFAULT 'queued',
-  priority       INT NOT NULL DEFAULT 0,
-  due_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
-  payload_json   JSONB NOT NULL DEFAULT '{}'::jsonb,
-  binary_data    BYTEA,
-  lease_owner    TEXT,
-  lease_until    TIMESTAMPTZ,
-  enqueued_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-  started_at     TIMESTAMPTZ,
-  finished_at    TIMESTAMPTZ,
-  last_error     TEXT,
-  last_scheduled_at TIMESTAMPTZ
+CREATE TABLE dags (
+  dag_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  namespace_id UUID NOT NULL REFERENCES namespaces(namespace_id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  active_version_id UUID,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(namespace_id, name)
 );
 
--- JOB-LEVEL DEPENDENCIES (DAG Edges)
-CREATE TABLE IF NOT EXISTS job_dependencies (
-  dag_id         UUID NOT NULL REFERENCES dags(id) ON DELETE CASCADE,
-  dag_version    INT NOT NULL DEFAULT 1,
-  parent_job_id  BIGINT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
-  child_job_id   BIGINT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
-  dependency_type dependency_type NOT NULL DEFAULT 'order-only',
-  created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-  deleted        BOOLEAN NOT NULL DEFAULT FALSE,
-  PRIMARY KEY (dag_id, dag_version, parent_job_id, child_job_id)
+CREATE TABLE dag_versions (
+  dag_version_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  dag_id UUID NOT NULL REFERENCES dags(dag_id) ON DELETE CASCADE,
+  version_number INT NOT NULL,
+  version_note TEXT NOT NULL DEFAULT '',
+  based_on_version_id UUID REFERENCES dag_versions(dag_version_id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(dag_id, version_number)
 );
 
--- HISTORY TABLES
+ALTER TABLE dags
+ADD CONSTRAINT fk_dags_active_version
+FOREIGN KEY (active_version_id) REFERENCES dag_versions(dag_version_id);
 
-CREATE TABLE IF NOT EXISTS job_definitions_history (
-  def_id           UUID,
-  namespace        UUID,
-  name             TEXT,
-  version          INT,
-  kind             TEXT,
-  payload_template JSONB,
-  cron_spec        TEXT,
-  delay_interval   INTERVAL,
-  created_at       TIMESTAMPTZ,
-  deleted          BOOLEAN,
-  archived_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+CREATE TABLE dag_version_nodes (
+  node_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  dag_version_id UUID NOT NULL REFERENCES dag_versions(dag_version_id) ON DELETE CASCADE,
+  node_key TEXT NOT NULL,
+  display_name TEXT NOT NULL,
+  job_definition_id UUID NOT NULL REFERENCES job_definitions(definition_id),
+  UNIQUE(dag_version_id, node_key)
 );
 
-CREATE TABLE IF NOT EXISTS dags_history (
-  id           UUID,
-  namespace    UUID,
-  name         TEXT,
-  version      INT,
-  created_at   TIMESTAMPTZ,
-  deleted      BOOLEAN,
-  archived_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+CREATE TABLE dag_version_edges (
+  edge_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  dag_version_id UUID NOT NULL REFERENCES dag_versions(dag_version_id) ON DELETE CASCADE,
+  from_node_id UUID NOT NULL REFERENCES dag_version_nodes(node_id) ON DELETE CASCADE,
+  to_node_id UUID NOT NULL REFERENCES dag_version_nodes(node_id) ON DELETE CASCADE,
+  UNIQUE(dag_version_id, from_node_id, to_node_id)
 );
 
-CREATE TABLE IF NOT EXISTS jobs_history (
-  id             BIGINT,
-  dag_id         UUID,
-  def_id         UUID,
-  version        INT,
-  deleted        BOOLEAN,
-  status         job_status,
-  priority       INT,
-  due_at         TIMESTAMPTZ,
-  payload_json   JSONB,
-  binary_data    BYTEA,
-  lease_owner    TEXT,
-  lease_until    TIMESTAMPTZ,
-  enqueued_at    TIMESTAMPTZ,
-  started_at     TIMESTAMPTZ,
-  finished_at    TIMESTAMPTZ,
-  last_error     TEXT,
-  last_scheduled_at TIMESTAMPTZ,
-  archived_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+CREATE TABLE dag_runs (
+  run_id BIGSERIAL PRIMARY KEY,
+  dag_id UUID NOT NULL REFERENCES dags(dag_id) ON DELETE CASCADE,
+  dag_version_id UUID NOT NULL REFERENCES dag_versions(dag_version_id) ON DELETE RESTRICT,
+  trigger_type TEXT NOT NULL,
+  trigger_node_id UUID REFERENCES dag_version_nodes(node_id) ON DELETE RESTRICT,
+  trigger_definition_id UUID REFERENCES job_definitions(definition_id),
+  scheduled_at TIMESTAMPTZ NOT NULL,
+  status run_status NOT NULL DEFAULT 'waiting',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  started_at TIMESTAMPTZ,
+  finished_at TIMESTAMPTZ
 );
 
-CREATE TABLE IF NOT EXISTS job_dependencies_history (
-  dag_id         UUID,
-  dag_version    INT,
-  parent_job_id  BIGINT,
-  child_job_id   BIGINT,
-  dependency_type dependency_type,
-  created_at     TIMESTAMPTZ,
-  deleted        BOOLEAN,
-  archived_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+CREATE TABLE jobs (
+  job_id BIGSERIAL PRIMARY KEY,
+  run_id BIGINT NOT NULL REFERENCES dag_runs(run_id) ON DELETE CASCADE,
+  dag_version_node_id UUID NOT NULL REFERENCES dag_version_nodes(node_id) ON DELETE RESTRICT,
+  job_definition_id UUID NOT NULL REFERENCES job_definitions(definition_id) ON DELETE RESTRICT,
+  node_key TEXT NOT NULL,
+  display_name TEXT NOT NULL,
+  status job_status NOT NULL DEFAULT 'waiting',
+  priority INT NOT NULL DEFAULT 0,
+  due_at TIMESTAMPTZ NOT NULL,
+  payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  lease_owner TEXT,
+  lease_until TIMESTAMPTZ,
+  started_at TIMESTAMPTZ,
+  finished_at TIMESTAMPTZ,
+  last_error TEXT
 );
 
--- FRONTIER TABLE
-
-CREATE TABLE IF NOT EXISTS job_frontier (
-    job_id BIGINT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
-    ready  BOOLEAN NOT NULL DEFAULT FALSE
+CREATE TABLE job_dependencies (
+  parent_job_id BIGINT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
+  child_job_id BIGINT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
+  PRIMARY KEY(parent_job_id, child_job_id)
 );
 
-CREATE INDEX idx_job_frontier_ready ON job_frontier(ready);
+CREATE TABLE job_frontier (
+  job_id BIGINT PRIMARY KEY REFERENCES jobs(job_id) ON DELETE CASCADE,
+  ready BOOLEAN NOT NULL DEFAULT FALSE
+);
 
--- Initialize frontier entry for a newly created job.
--- If the job has NO parents (for this DAG), it's ready immediately.
-CREATE OR REPLACE FUNCTION init_frontier_for_job(job_id BIGINT, dag UUID)
-RETURNS VOID AS $$
-BEGIN
-    INSERT INTO job_frontier(job_id, ready)
-    VALUES (
-        job_id,
-        NOT EXISTS (
-            SELECT 1
-            FROM job_dependencies
-            WHERE dag_id = dag
-              AND child_job_id = job_id
-              AND deleted = FALSE
-        )
-    )
-    ON CONFLICT (job_id) DO NOTHING;
-END;
-$$ LANGUAGE plpgsql;
-
--- When a parent job succeeds, mark its children as ready.
-CREATE OR REPLACE FUNCTION frontier_mark_children_ready()
-RETURNS TRIGGER AS $$
-BEGIN
-    UPDATE job_frontier AS f
-    SET ready = TRUE
-    FROM job_dependencies AS deps
-    WHERE deps.parent_job_id = NEW.id
-      AND deps.child_job_id = f.job_id
-      AND deps.deleted = FALSE;
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-DROP TRIGGER IF EXISTS trg_parent_success_promote ON jobs;
-
-CREATE TRIGGER trg_parent_success_promote
-AFTER UPDATE OF status ON jobs
-FOR EACH ROW
-WHEN (NEW.status = 'succeeded')
-EXECUTE FUNCTION frontier_mark_children_ready();
-
--- job_queue for worker gateway
-
-CREATE TABLE IF NOT EXISTS job_queue (
-  id             BIGSERIAL PRIMARY KEY,
-  job_id         BIGINT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
-  available_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-  priority       INT NOT NULL DEFAULT 0,
-  attempts       INT NOT NULL DEFAULT 0,
+CREATE TABLE job_queue (
+  id BIGSERIAL PRIMARY KEY,
+  job_id BIGINT NOT NULL UNIQUE REFERENCES jobs(job_id) ON DELETE CASCADE,
+  available_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  priority INT NOT NULL DEFAULT 0,
+  attempts INT NOT NULL DEFAULT 0,
   reserved_until TIMESTAMPTZ,
-  consumer_id    TEXT,
-  created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+  consumer_id TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- INDEXES
+CREATE TABLE cron_state (
+  node_id UUID PRIMARY KEY REFERENCES dag_version_nodes(node_id) ON DELETE CASCADE,
+  next_run_at TIMESTAMPTZ
+);
 
-CREATE INDEX idx_jobs_dag ON jobs(dag_id);
-CREATE INDEX idx_jobs_def ON jobs(def_id);
-CREATE INDEX idx_jobs_status ON jobs(status);
-CREATE INDEX idx_jobs_due ON jobs(due_at);
+CREATE TABLE cron_fires (
+  node_id UUID NOT NULL REFERENCES dag_version_nodes(node_id) ON DELETE CASCADE,
+  scheduled_at TIMESTAMPTZ NOT NULL,
+  run_id BIGINT NOT NULL REFERENCES dag_runs(run_id) ON DELETE CASCADE,
+  PRIMARY KEY(node_id, scheduled_at)
+);
 
-CREATE INDEX idx_definitions_ns ON job_definitions(namespace, name);
-
-CREATE INDEX idx_definitions_cron ON job_definitions(cron_spec)
-  WHERE cron_spec IS NOT NULL AND trim(cron_spec) <> '';
-
-CREATE INDEX idx_job_deps_dag ON job_dependencies(dag_id);
-CREATE INDEX idx_job_deps_parent ON job_dependencies(parent_job_id);
+CREATE INDEX idx_defs_namespace ON job_definitions(namespace_id, name);
+CREATE INDEX idx_defs_cron ON job_definitions(cron_spec) WHERE COALESCE(schedule_type,'') IN ('', 'cron') AND cron_spec IS NOT NULL AND btrim(cron_spec) <> '';
+CREATE INDEX idx_defs_interval ON job_definitions(interval_start_at, interval_seconds) WHERE schedule_type='interval' AND interval_seconds IS NOT NULL AND interval_start_at IS NOT NULL;
+CREATE INDEX idx_dags_namespace ON dags(namespace_id, name);
+CREATE INDEX idx_dag_versions_dag ON dag_versions(dag_id, version_number DESC);
+CREATE INDEX idx_dag_nodes_version ON dag_version_nodes(dag_version_id, node_key);
+CREATE INDEX idx_dag_edges_version ON dag_version_edges(dag_version_id);
+CREATE INDEX idx_runs_dag ON dag_runs(dag_id, run_id DESC);
+CREATE UNIQUE INDEX ux_dag_runs_scheduled_occurrence ON dag_runs(trigger_type, trigger_node_id, scheduled_at) WHERE trigger_type IN ('cron','interval');
+CREATE INDEX idx_jobs_run ON jobs(run_id, job_id);
+CREATE INDEX idx_jobs_status_due ON jobs(status, due_at);
+CREATE INDEX idx_job_frontier_ready ON job_frontier(ready);
 CREATE INDEX idx_job_deps_child ON job_dependencies(child_job_id);
-
-CREATE INDEX IF NOT EXISTS idx_job_queue_available ON job_queue(available_at);
-CREATE INDEX IF NOT EXISTS idx_job_queue_reserved ON job_queue(reserved_until);
-CREATE INDEX IF NOT EXISTS idx_job_queue_priority ON job_queue(priority DESC, available_at);
-
+CREATE INDEX idx_job_queue_available ON job_queue(available_at, priority DESC);

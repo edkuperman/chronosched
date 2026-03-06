@@ -1,0 +1,99 @@
+# ------------------------------
+# Go build artifacts
+# ------------------------------
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Go coverage
+coverage.out
+*.coverprofile
+coverage.html
+
+# Go workspace
+go.work
+go.work.sum
+
+# ------------------------------
+# Binaries / build output
+# ------------------------------
+bin/
+dist/
+build/
+
+# ------------------------------
+# Logs
+# ------------------------------
+*.log
+
+# ------------------------------
+# Environment / local config
+# ------------------------------
+.env
+.env.*
+!.env.example
+
+# ------------------------------
+# OS files
+# ------------------------------
+.DS_Store
+Thumbs.db
+
+# ------------------------------
+# IDE / Editor files
+# ------------------------------
+
+# VSCode
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# GoLand / IntelliJ
+.idea/
+
+# Vim
+*.swp
+*.swo
+*~
+
+# ------------------------------
+# Test caches
+# ------------------------------
+testdata/tmp/
+tmp/
+
+# ------------------------------
+# Docker
+# ------------------------------
+docker-compose.override.yml
+
+# Local Docker volumes
+docker-data/
+
+# ------------------------------
+# Debug
+# ------------------------------
+debug
+*.debug
+
+# ------------------------------
+# Generated files
+# ------------------------------
+*.gen.go
+
+# ------------------------------
+# Cache files
+# ------------------------------
+*.pyc
+
+# ------------------------------
+# Misc
+# ------------------------------
+*.bak
+*.tmp

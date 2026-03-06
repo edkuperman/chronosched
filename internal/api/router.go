@@ -1,90 +1,54 @@
 package api
 
 import (
-    "net/http"
-
-    "github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5"
+	"net/http"
 )
 
-// NewHTTPHandler constructs the top-level HTTP router and mounts
-// all public and internal routes in a structured way.
 func NewHTTPHandler(h *Handler) http.Handler {
-    r := chi.NewRouter()
+	r := chi.NewRouter()
+	r.Get("/healthz", h.healthz)
+	r.Route("/api/v2", func(r chi.Router) {
+		r.Get("/namespaces", h.listNamespaces)
+		r.Post("/namespaces", h.createNamespace)
+		r.Get("/namespaces/{name}", h.getNamespace)
 
-    // Health
-    r.Get("/healthz", h.healthz)
+		r.Get("/namespaces/{namespace_id}/job-definitions", h.listDefinitions)
+		r.Post("/job-definitions", h.createDefinition)
+		r.Get("/job-definitions/{definition_id}", h.getDefinition)
+		r.Delete("/job-definitions/{definition_id}", h.deleteDefinition)
+		r.Put("/job-definitions/{definition_id}", h.updateDefinition)
+		r.Post("/job-definitions/{definition_id}/enable", h.enableDefinition)
+		r.Post("/job-definitions/{definition_id}/disable", h.disableDefinition)
+		r.Post("/job-definitions/{definition_id}/pause", h.pauseDefinition)
+		r.Post("/job-definitions/{definition_id}/resume", h.resumeDefinition)
+		r.Get("/job-definitions/{definition_id}/usages", h.definitionUsages)
 
-    // Public API routes
-    r.Route("/api/v1", func(r chi.Router) {
-        // Namespaces
-        r.Get("/namespaces", h.listNamespaces)
-        r.Post("/namespaces", h.createNamespace)
-        r.Route("/namespace/{name}", func(r chi.Router) {
-            r.Get("/", h.getNamespace)
-            r.Put("/", h.renameNamespace)
-            r.Delete("/", h.deleteNamespace)
-        })
+		r.Get("/namespaces/{namespace_id}/dags", h.listDAGs)
+		r.Post("/namespaces/{namespace_id}/dags", h.createDAG)
+		r.Get("/dags/{dag_id}", h.getDAG)
+		r.Delete("/dags/{dag_id}", h.deleteDAG)
+		r.Get("/dags/{dag_id}/versions", h.listDAGVersions)
+		r.Post("/dags/{dag_id}/versions", h.createDAGVersion)
+		r.Post("/dags/{dag_id}/runs", h.createRun)
+		r.Get("/dags/{dag_id}/runs", h.listRuns)
 
-        // DAGs by namespace
-        r.Route("/dags/{namespace_id}", func(r chi.Router) {
-            r.Get("/", h.listDAGs)
-            r.Post("/", h.createDAG)
-            r.Put("/", h.upsertDAG)
-        })
-        r.Route("/dags/{namespace_id}/{id}", func(r chi.Router) {
-            r.Get("/", h.getDAG)
-            r.Put("/", h.updateDAG)
-            r.Delete("/", h.deleteDAG)
-        })
+		r.Get("/dag-versions/{dag_version_id}", h.getDAGVersion)
+		r.Get("/dag-versions/{dag_version_id}/graph", h.getDAGGraph)
+		r.Post("/dag-versions/{dag_version_id}/activate", h.activateDAGVersion)
+		r.Post("/dag-versions/{dag_version_id}/revert", h.revertDAGVersion)
 
-        // Definitions by namespace
-        r.Route("/definitions/{namespace_id}", func(r chi.Router) {
-            r.Get("/", h.listDefinitions)
-            r.Post("/", h.createDefinition)
-            r.Put("/", h.bulkUpsertDefinitions)
-        })
-        r.Route("/definitions/{namespace_id}/{id}", func(r chi.Router) {
-            r.Get("/", h.getDefinition)
-            r.Put("/", h.updateDefinition)
-            r.Delete("/", h.deleteDefinition)
-        })
+		r.Get("/runs/{run_id}", h.getRun)
+		r.Get("/runs/{run_id}/jobs", h.listRunJobs)
+		r.Get("/runs/{run_id}/graph", h.getRunGraph)
 
-        // Jobs under a DAG
-        r.Route("/dags/{dag_id}/jobs", func(r chi.Router) {
-            r.Get("/", h.listJobs)
-            r.Post("/", h.createDagJob)
-            r.Put("/", h.bulkUpsertJobs)
-        })
-        r.Route("/dags/{dag_id}/jobs/{id}", func(r chi.Router) {
-            r.Get("/", h.getJob)
-            r.Put("/", h.updateJob)
-            r.Delete("/", h.deleteJob)
-        })
-        r.Post("/dags/{dag_id}/jobs/{jobId}/complete", h.completeJob)
-        r.Post("/dags/{dag_id}/jobs/{jobId}/fail", h.failJob)
+		r.Get("/jobs/{job_id}/readiness", h.getJobReadiness)
+		r.Get("/admin/check/global-cycles", h.checkGlobalCycles)
+	})
 
-        // Dependencies under a DAG
-        r.Route("/dags/{dag_id}/dependencies", func(r chi.Router) {
-            r.Get("/", h.listDependencies)
-            r.Post("/", h.createDependency)
-            r.Put("/", h.bulkUpsertDependencies)
-            r.Patch("/", h.patchDependencies)
-            r.Delete("/", h.deleteDependencies)
-        })
-
-        // Admin
-        r.Get("/admin/check/global-cycles", h.checkGlobalCycles)
-        r.Post("/admin/prune", h.prune)
-
-        // Existing flat job creation route (legacy)
-        r.Post("/jobs", h.createJob)
-    })
-
-    // Internal worker gateway
-    r.Route("/internal/workers", func(r chi.Router) {
-        r.Post("/lease", h.leaseJobs)
-        r.Post("/result", h.reportResult)
-    })
-
-    return r
+	r.Route("/internal/workers", func(r chi.Router) {
+		r.Post("/lease", h.leaseJobs)
+		r.Post("/result", h.reportResult)
+	})
+	return r
 }

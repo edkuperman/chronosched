@@ -9,10 +9,21 @@ services:
     volumes:
       - ./cmd/server:/src/cmd/server:ro   # read-only source mount
 
+  scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile.debug.scheduler
+    ports:
+      - "40002:40002"
+    volumes:
+      - ./cmd/scheduler:/src/cmd/scheduler:ro
+
   worker:
     build:
       context: .
       dockerfile: Dockerfile.debug.worker
+    environment:
+      CHRONOSCHED_BASE_URL: http://server:8080
     ports:
       - "40001:40001"
     volumes:

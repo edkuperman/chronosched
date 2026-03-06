@@ -2,22 +2,26 @@ package main
 
 import (
 	"context"
-	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 
-	"github.com/edkuperman/chronosched/internal/api"
 	"github.com/edkuperman/chronosched/internal/dal/sql"
 	"github.com/edkuperman/chronosched/internal/logger"
 	"github.com/edkuperman/chronosched/internal/repository"
+	"github.com/edkuperman/chronosched/internal/scheduler"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func main() {
-	ctx := context.Background()
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
 		dbURL = "postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable"
 	}
+
 	pool, err := pgxpool.New(ctx, dbURL)
 	if err != nil {
 		logger.Error(err, "failed to connect to db")
@@ -36,10 +40,10 @@ func main() {
 		Admin:       sql.NewAdminSQL(dal),
 	}
 
-	srv := &http.Server{Addr: ":8080", Handler: api.NewHTTPHandler(api.NewHandler(repos))}
-	logger.Info("chronosched v2 listening on :8080")
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		logger.Error(err, "server error")
+	sched := scheduler.NewScheduler(repos)
+	logger.Info("chronosched scheduler listening for work")
+	if err := sched.Run(ctx); err != nil && ctx.Err() == nil {
+		logger.Error(err, "scheduler stopped")
 		os.Exit(1)
 	}
 }
