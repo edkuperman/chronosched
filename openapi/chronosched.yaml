@@ -1,57 +1,1273 @@
 openapi: 3.0.3
 info:
-  title: Chronosched v2
+  title: Chronosched API
   version: 2.0.0
+  description: |
+    Chronosched is a DAG-oriented workflow scheduler with versioned DAG authoring,
+    manual and scheduled runs, worker leasing, run graph inspection, and job
+    readiness introspection.
+
+    This specification documents the HTTP API implemented by the current Go codebase.
+    It is intended to be usable in Swagger UI and detailed enough for engineering
+    review, integration work, and interview/demo purposes.
+
+tags:
+  - name: Health
+  - name: Namespaces
+  - name: Job Definitions
+  - name: DAGs
+  - name: DAG Versions
+  - name: Runs
+  - name: Jobs
+  - name: Admin
+  - name: Workers
+
 paths:
   /healthz:
     get:
+      tags: [Health]
+      summary: Health check
+      operationId: healthz
       responses:
         '200':
-          description: ok
+          description: Service is healthy.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              examples:
+                ok:
+                  value:
+                    status: ok
+
+  /api/v2/namespaces:
+    get:
+      tags: [Namespaces]
+      summary: List namespaces
+      operationId: listNamespaces
+      responses:
+        '200':
+          description: Namespaces returned successfully.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Namespace'
+        default:
+          $ref: '#/components/responses/TextError'
+    post:
+      tags: [Namespaces]
+      summary: Create namespace
+      operationId: createNamespace
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateNamespaceRequest'
+      responses:
+        '201':
+          description: Namespace created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Namespace'
+        '400':
+          $ref: '#/components/responses/TextError'
+        default:
+          $ref: '#/components/responses/TextError'
+
+  /api/v2/namespaces/{name}:
+    get:
+      tags: [Namespaces]
+      summary: Get namespace by name
+      operationId: getNamespace
+      parameters:
+        - $ref: '#/components/parameters/NamespaceName'
+      responses:
+        '200':
+          description: Namespace returned successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Namespace'
+        '404':
+          $ref: '#/components/responses/TextError'
+
+  /api/v2/namespaces/{namespace_id}/job-definitions:
+    get:
+      tags: [Job Definitions]
+      summary: List job definitions in a namespace
+      operationId: listJobDefinitions
+      parameters:
+        - $ref: '#/components/parameters/NamespaceID'
+      responses:
+        '200':
+          description: Job definitions returned successfully.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/JobDefinition'
+        default:
+          $ref: '#/components/responses/TextError'
+
   /api/v2/job-definitions:
     post:
+      tags: [Job Definitions]
       summary: Create job definition
+      operationId: createJobDefinition
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateJobDefinitionRequest'
+      responses:
+        '201':
+          description: Job definition created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobDefinition'
+        '400':
+          $ref: '#/components/responses/TextError'
+        default:
+          $ref: '#/components/responses/TextError'
+
   /api/v2/job-definitions/{definition_id}:
     get:
+      tags: [Job Definitions]
       summary: Get job definition
+      operationId: getJobDefinition
+      parameters:
+        - $ref: '#/components/parameters/DefinitionID'
+      responses:
+        '200':
+          description: Job definition returned successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobDefinition'
+        '404':
+          $ref: '#/components/responses/TextError'
     put:
+      tags: [Job Definitions]
       summary: Update job definition
+      operationId: updateJobDefinition
+      parameters:
+        - $ref: '#/components/parameters/DefinitionID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateJobDefinitionRequest'
+      responses:
+        '200':
+          description: Job definition updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobDefinition'
+        '400':
+          $ref: '#/components/responses/TextError'
+        '404':
+          $ref: '#/components/responses/TextError'
+        default:
+          $ref: '#/components/responses/TextError'
+    delete:
+      tags: [Job Definitions]
+      summary: Delete job definition
+      operationId: deleteJobDefinition
+      parameters:
+        - $ref: '#/components/parameters/DefinitionID'
+      responses:
+        '204':
+          description: Job definition deleted.
+        default:
+          $ref: '#/components/responses/TextError'
+
+  /api/v2/job-definitions/{definition_id}/enable:
+    post:
+      tags: [Job Definitions]
+      summary: Enable job definition
+      operationId: enableJobDefinition
+      parameters:
+        - $ref: '#/components/parameters/DefinitionID'
+      responses:
+        '204':
+          description: Job definition enabled.
+        default:
+          $ref: '#/components/responses/TextError'
+
+  /api/v2/job-definitions/{definition_id}/disable:
+    post:
+      tags: [Job Definitions]
+      summary: Disable job definition
+      operationId: disableJobDefinition
+      parameters:
+        - $ref: '#/components/parameters/DefinitionID'
+      responses:
+        '204':
+          description: Job definition disabled.
+        default:
+          $ref: '#/components/responses/TextError'
+
   /api/v2/job-definitions/{definition_id}/pause:
     post:
-      summary: Pause future scheduled occurrences for a definition
+      tags: [Job Definitions]
+      summary: Pause future scheduled occurrences for a job definition
+      operationId: pauseJobDefinition
+      parameters:
+        - $ref: '#/components/parameters/DefinitionID'
+      responses:
+        '204':
+          description: Job definition paused.
+        default:
+          $ref: '#/components/responses/TextError'
+
   /api/v2/job-definitions/{definition_id}/resume:
     post:
-      summary: Resume future scheduled occurrences for a definition
+      tags: [Job Definitions]
+      summary: Resume future scheduled occurrences for a job definition
+      operationId: resumeJobDefinition
+      parameters:
+        - $ref: '#/components/parameters/DefinitionID'
+      responses:
+        '204':
+          description: Job definition resumed.
+        default:
+          $ref: '#/components/responses/TextError'
+
   /api/v2/job-definitions/{definition_id}/usages:
     get:
-      summary: List where a definition is used across DAG versions
+      tags: [Job Definitions]
+      summary: List where a job definition is used across DAG versions
+      operationId: listJobDefinitionUsages
+      parameters:
+        - $ref: '#/components/parameters/DefinitionID'
+      responses:
+        '200':
+          description: Definition usages returned successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DefinitionUsageResponse'
+        default:
+          $ref: '#/components/responses/TextError'
+
   /api/v2/namespaces/{namespace_id}/dags:
     get:
+      tags: [DAGs]
       summary: List DAGs in a namespace
+      operationId: listDAGs
+      parameters:
+        - $ref: '#/components/parameters/NamespaceID'
+      responses:
+        '200':
+          description: DAGs returned successfully.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DAG'
+        default:
+          $ref: '#/components/responses/TextError'
     post:
+      tags: [DAGs]
       summary: Create DAG
+      operationId: createDAG
+      parameters:
+        - $ref: '#/components/parameters/NamespaceID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateDAGRequest'
+      responses:
+        '201':
+          description: DAG created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DAG'
+        '400':
+          $ref: '#/components/responses/TextError'
+        default:
+          $ref: '#/components/responses/TextError'
+
+  /api/v2/dags/{dag_id}:
+    get:
+      tags: [DAGs]
+      summary: Get DAG
+      operationId: getDAG
+      parameters:
+        - $ref: '#/components/parameters/DAGID'
+      responses:
+        '200':
+          description: DAG returned successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DAG'
+        '404':
+          $ref: '#/components/responses/TextError'
+    delete:
+      tags: [DAGs]
+      summary: Delete DAG
+      operationId: deleteDAG
+      parameters:
+        - $ref: '#/components/parameters/DAGID'
+      responses:
+        '204':
+          description: DAG deleted.
+        default:
+          $ref: '#/components/responses/TextError'
+
   /api/v2/dags/{dag_id}/versions:
     get:
+      tags: [DAG Versions]
       summary: List DAG versions
+      operationId: listDAGVersions
+      parameters:
+        - $ref: '#/components/parameters/DAGID'
+      responses:
+        '200':
+          description: DAG versions returned successfully.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DAGVersion'
+        default:
+          $ref: '#/components/responses/TextError'
     post:
+      tags: [DAG Versions]
       summary: Publish DAG version
-  /api/v2/dag-versions/{dag_version_id}/graph:
-    get:
-      summary: Get authoring graph for a DAG version
-  /api/v2/dag-versions/{dag_version_id}/activate:
-    post:
-      summary: Enable a DAG version
-  /api/v2/dag-versions/{dag_version_id}/revert:
-    post:
-      summary: Create a new copy from an earlier DAG version
+      description: Create a new DAG version with authoring nodes and edges.
+      operationId: createDAGVersion
+      parameters:
+        - $ref: '#/components/parameters/DAGID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateDAGVersionRequest'
+      responses:
+        '201':
+          description: DAG version created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DAGVersion'
+        '400':
+          $ref: '#/components/responses/TextError'
+        default:
+          $ref: '#/components/responses/TextError'
+
   /api/v2/dags/{dag_id}/runs:
     get:
+      tags: [Runs]
       summary: List runs for a DAG
+      operationId: listRuns
+      parameters:
+        - $ref: '#/components/parameters/DAGID'
+      responses:
+        '200':
+          description: Runs returned successfully.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DAGRun'
+        default:
+          $ref: '#/components/responses/TextError'
     post:
-      summary: Trigger a manual run
+      tags: [Runs]
+      summary: Trigger manual DAG run
+      operationId: createRun
+      parameters:
+        - $ref: '#/components/parameters/DAGID'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRunRequest'
+      responses:
+        '201':
+          description: Run created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DAGRun'
+        default:
+          $ref: '#/components/responses/TextError'
+
+  /api/v2/dag-versions/{dag_version_id}:
+    get:
+      tags: [DAG Versions]
+      summary: Get DAG version
+      operationId: getDAGVersion
+      parameters:
+        - $ref: '#/components/parameters/DAGVersionID'
+      responses:
+        '200':
+          description: DAG version returned successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DAGVersion'
+        '404':
+          $ref: '#/components/responses/TextError'
+
+  /api/v2/dag-versions/{dag_version_id}/graph:
+    get:
+      tags: [DAG Versions]
+      summary: Get authoring graph for a DAG version
+      operationId: getDAGVersionGraph
+      parameters:
+        - $ref: '#/components/parameters/DAGVersionID'
+      responses:
+        '200':
+          description: DAG authoring graph returned successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DAGVersionGraph'
+        '404':
+          $ref: '#/components/responses/TextError'
+
+  /api/v2/dag-versions/{dag_version_id}/activate:
+    post:
+      tags: [DAG Versions]
+      summary: Activate DAG version
+      operationId: activateDAGVersion
+      parameters:
+        - $ref: '#/components/parameters/DAGVersionID'
+      responses:
+        '204':
+          description: DAG version activated.
+        default:
+          $ref: '#/components/responses/TextError'
+
+  /api/v2/dag-versions/{dag_version_id}/revert:
+    post:
+      tags: [DAG Versions]
+      summary: Create a new DAG version copied from an earlier version
+      operationId: revertDAGVersion
+      parameters:
+        - $ref: '#/components/parameters/DAGVersionID'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RevertDAGVersionRequest'
+      responses:
+        '201':
+          description: New DAG version created from the source version.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DAGVersion'
+        default:
+          $ref: '#/components/responses/TextError'
+
+  /api/v2/runs/{run_id}:
+    get:
+      tags: [Runs]
+      summary: Get run
+      operationId: getRun
+      parameters:
+        - $ref: '#/components/parameters/RunID'
+      responses:
+        '200':
+          description: Run returned successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DAGRun'
+        '400':
+          $ref: '#/components/responses/TextError'
+        '404':
+          $ref: '#/components/responses/TextError'
+
+  /api/v2/runs/{run_id}/jobs:
+    get:
+      tags: [Runs]
+      summary: List jobs for a run
+      operationId: listRunJobs
+      parameters:
+        - $ref: '#/components/parameters/RunID'
+      responses:
+        '200':
+          description: Run jobs returned successfully.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/RunJob'
+        '400':
+          $ref: '#/components/responses/TextError'
+        default:
+          $ref: '#/components/responses/TextError'
+
   /api/v2/runs/{run_id}/graph:
     get:
+      tags: [Runs]
       summary: Get runtime graph for a run
+      operationId: getRunGraph
+      parameters:
+        - $ref: '#/components/parameters/RunID'
+      responses:
+        '200':
+          description: Runtime graph returned successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunGraph'
+        '400':
+          $ref: '#/components/responses/TextError'
+        default:
+          $ref: '#/components/responses/TextError'
+
   /api/v2/jobs/{job_id}/readiness:
     get:
-      summary: Explain why a job is or is not ready
+      tags: [Jobs]
+      summary: Explain why a job is or is not ready to run
+      operationId: getJobReadiness
+      parameters:
+        - $ref: '#/components/parameters/JobID'
+      responses:
+        '200':
+          description: Job readiness returned successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobReadiness'
+        '400':
+          $ref: '#/components/responses/TextError'
+        default:
+          $ref: '#/components/responses/TextError'
+
+  /api/v2/admin/check/global-cycles:
+    get:
+      tags: [Admin]
+      summary: Check for global scheduling cycles
+      operationId: checkGlobalCycles
+      responses:
+        '200':
+          description: Cycle check results returned successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GlobalCycleCheckResponse'
+        default:
+          $ref: '#/components/responses/TextError'
+
+  /internal/workers/lease:
+    post:
+      tags: [Workers]
+      summary: Lease ready jobs for a worker
+      operationId: leaseJobs
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LeaseRequest'
+      responses:
+        '200':
+          description: Jobs leased successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LeaseResponse'
+        '400':
+          $ref: '#/components/responses/TextError'
+        default:
+          $ref: '#/components/responses/TextError'
+
+  /internal/workers/result:
+    post:
+      tags: [Workers]
+      summary: Report execution result for a leased job
+      operationId: reportResult
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReportResultRequest'
+      responses:
+        '204':
+          description: Result accepted.
+        '400':
+          $ref: '#/components/responses/TextError'
+        default:
+          $ref: '#/components/responses/TextError'
+
+components:
+  parameters:
+    NamespaceName:
+      name: name
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Namespace name.
+    NamespaceID:
+      name: namespace_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Namespace identifier.
+    DefinitionID:
+      name: definition_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Job definition identifier.
+    DAGID:
+      name: dag_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: DAG identifier.
+    DAGVersionID:
+      name: dag_version_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: DAG version identifier.
+    RunID:
+      name: run_id
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+      description: Run identifier.
+    JobID:
+      name: job_id
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+      description: Job identifier.
+
+  responses:
+    TextError:
+      description: Text error response.
+      content:
+        text/plain:
+          schema:
+            type: string
+          examples:
+            message:
+              value: invalid json
+
+  schemas:
+    HealthResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          example: ok
+
+    AnyJSON:
+      description: Arbitrary JSON object or value.
+      oneOf:
+        - type: object
+          additionalProperties: true
+        - type: array
+          items: {}
+        - type: string
+        - type: number
+        - type: integer
+        - type: boolean
+
+    Namespace:
+      type: object
+      required: [id, name, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          example: demo
+        created_at:
+          type: string
+          format: date-time
+
+    CreateNamespaceRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          example: demo
+
+    Schedule:
+      type: object
+      description: Embedded schedule configuration used by job definitions and DAG graph nodes.
+      properties:
+        type:
+          type: string
+          description: Schedule type such as cron or interval.
+          example: cron
+        cron:
+          type: string
+          example: 0 17 * * 1-5
+        interval_seconds:
+          type: integer
+          format: int32
+          minimum: 1
+          nullable: true
+          example: 300
+        start_at:
+          type: string
+          format: date-time
+          nullable: true
+        timezone:
+          type: string
+          example: UTC
+        on_failure:
+          type: string
+          description: Failure policy for scheduled triggering.
+          example: continue
+
+    JobDefinition:
+      type: object
+      required:
+        [id, namespace_id, name, kind, payload_template, is_enabled, is_paused, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        namespace_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+        kind:
+          type: string
+          example: cmd
+        payload_template:
+          $ref: '#/components/schemas/AnyJSON'
+        schedule:
+          $ref: '#/components/schemas/Schedule'
+        is_enabled:
+          type: boolean
+        is_paused:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    CreateJobDefinitionRequest:
+      type: object
+      required: [namespace_id, name]
+      properties:
+        namespace_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          minLength: 1
+        description:
+          type: string
+        kind:
+          type: string
+          default: cmd
+        payload_template:
+          $ref: '#/components/schemas/AnyJSON'
+        schedule:
+          $ref: '#/components/schemas/Schedule'
+        is_enabled:
+          type: boolean
+          default: true
+
+    UpdateJobDefinitionRequest:
+      type: object
+      properties:
+        namespace_id:
+          type: string
+          format: uuid
+          description: Ignored by the current implementation during update.
+        name:
+          type: string
+        description:
+          type: string
+        kind:
+          type: string
+        payload_template:
+          $ref: '#/components/schemas/AnyJSON'
+        schedule:
+          $ref: '#/components/schemas/Schedule'
+        is_enabled:
+          type: boolean
+
+    DefinitionUsage:
+      type: object
+      required: [dag_id, dag_name, dag_version_id, version_number, node_key, display_name, is_active]
+      properties:
+        dag_id:
+          type: string
+          format: uuid
+        dag_name:
+          type: string
+        dag_version_id:
+          type: string
+          format: uuid
+        version_number:
+          type: integer
+        node_key:
+          type: string
+        display_name:
+          type: string
+        is_active:
+          type: boolean
+
+    DefinitionUsageResponse:
+      type: object
+      required: [definition_id, usages]
+      properties:
+        definition_id:
+          type: string
+          format: uuid
+        usages:
+          type: array
+          items:
+            $ref: '#/components/schemas/DefinitionUsage'
+
+    DAG:
+      type: object
+      required: [id, namespace_id, name, latest_version_number, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        namespace_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+        active_version_id:
+          type: string
+          format: uuid
+          nullable: true
+        latest_version_number:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+
+    CreateDAGRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+        description:
+          type: string
+
+    DAGVersion:
+      type: object
+      required: [id, dag_id, version_number, is_active, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        dag_id:
+          type: string
+          format: uuid
+        version_number:
+          type: integer
+        version_note:
+          type: string
+        based_on_version_id:
+          type: string
+          format: uuid
+          nullable: true
+        is_active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+
+    DAGVersionInputNode:
+      type: object
+      required: [node_key, display_name, job_definition_id]
+      properties:
+        node_key:
+          type: string
+          example: extract_orders
+        display_name:
+          type: string
+          example: Extract Orders
+        job_definition_id:
+          type: string
+          format: uuid
+
+    DAGVersionInputEdge:
+      type: object
+      required: [from, to]
+      properties:
+        from:
+          type: string
+          example: extract_orders
+        to:
+          type: string
+          example: load_orders
+
+    CreateDAGVersionRequest:
+      type: object
+      required: [nodes, edges]
+      properties:
+        version_note:
+          type: string
+          example: Initial published graph
+        based_on_version_id:
+          type: string
+          format: uuid
+          nullable: true
+        nodes:
+          type: array
+          items:
+            $ref: '#/components/schemas/DAGVersionInputNode'
+        edges:
+          type: array
+          items:
+            $ref: '#/components/schemas/DAGVersionInputEdge'
+
+    DAGVersionNode:
+      type: object
+      required: [id, node_key, display_name, job_definition_id, job_definition_name]
+      properties:
+        id:
+          type: string
+          format: uuid
+        node_key:
+          type: string
+        display_name:
+          type: string
+        job_definition_id:
+          type: string
+          format: uuid
+        job_definition_name:
+          type: string
+        schedule:
+          $ref: '#/components/schemas/Schedule'
+
+    DAGVersionEdge:
+      type: object
+      required: [from_node_key, to_node_key]
+      properties:
+        from_node_key:
+          type: string
+        to_node_key:
+          type: string
+
+    DAGVersionGraph:
+      type: object
+      required: [dag_version_id, dag_id, dag_name, version_number, is_active, nodes, edges]
+      properties:
+        dag_version_id:
+          type: string
+          format: uuid
+        dag_id:
+          type: string
+          format: uuid
+        dag_name:
+          type: string
+        version_number:
+          type: integer
+        is_active:
+          type: boolean
+        nodes:
+          type: array
+          items:
+            $ref: '#/components/schemas/DAGVersionNode'
+        edges:
+          type: array
+          items:
+            $ref: '#/components/schemas/DAGVersionEdge'
+
+    RevertDAGVersionRequest:
+      type: object
+      properties:
+        activate:
+          type: boolean
+          default: false
+        version_note:
+          type: string
+          example: revert copy
+
+    RunTrigger:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          example: manual
+        definition_id:
+          type: string
+          format: uuid
+          nullable: true
+        definition_name:
+          type: string
+          nullable: true
+
+    DAGRun:
+      type: object
+      required:
+        [id, dag_id, dag_version_id, trigger, status, scheduled_at, created_at]
+      properties:
+        id:
+          type: integer
+          format: int64
+        dag_id:
+          type: string
+          format: uuid
+        dag_version_id:
+          type: string
+          format: uuid
+        dag_name:
+          type: string
+        version_number:
+          type: integer
+        trigger:
+          $ref: '#/components/schemas/RunTrigger'
+        status:
+          $ref: '#/components/schemas/RunStatus'
+        scheduled_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    CreateRunRequest:
+      type: object
+      properties:
+        dag_version_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Optional explicit version to run. When absent, the active DAG version is used.
+
+    RunJob:
+      type: object
+      required: [job_id, run_id, node_key, display_name, job_definition_id, status, due_at]
+      properties:
+        job_id:
+          type: integer
+          format: int64
+        run_id:
+          type: integer
+          format: int64
+        node_key:
+          type: string
+        display_name:
+          type: string
+        job_definition_id:
+          type: string
+          format: uuid
+        job_definition_name:
+          type: string
+        status:
+          $ref: '#/components/schemas/JobStatus'
+        due_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
+        last_error:
+          type: string
+          nullable: true
+        is_ready:
+          type: boolean
+          nullable: true
+
+    RunGraphEdge:
+      type: object
+      required: [from_job_id, to_job_id]
+      properties:
+        from_job_id:
+          type: integer
+          format: int64
+        to_job_id:
+          type: integer
+          format: int64
+
+    RunGraph:
+      type: object
+      required: [run, nodes, edges]
+      properties:
+        run:
+          $ref: '#/components/schemas/DAGRun'
+        nodes:
+          type: array
+          items:
+            $ref: '#/components/schemas/RunJob'
+        edges:
+          type: array
+          items:
+            $ref: '#/components/schemas/RunGraphEdge'
+
+    BlockingParent:
+      type: object
+      required: [job_id, node_key, status]
+      properties:
+        job_id:
+          type: integer
+          format: int64
+        node_key:
+          type: string
+        status:
+          $ref: '#/components/schemas/JobStatus'
+
+    JobReadiness:
+      type: object
+      required: [job_id, status, is_ready, blocking_upstreams]
+      properties:
+        job_id:
+          type: integer
+          format: int64
+        status:
+          $ref: '#/components/schemas/JobStatus'
+        is_ready:
+          type: boolean
+        blocking_upstreams:
+          type: array
+          items:
+            $ref: '#/components/schemas/BlockingParent'
+
+    QueueItem:
+      type: object
+      required: [queue_id, job_id, attempts, priority, node_key, kind, payload, definition_id]
+      properties:
+        queue_id:
+          type: integer
+          format: int64
+        job_id:
+          type: integer
+          format: int64
+        attempts:
+          type: integer
+        priority:
+          type: integer
+        node_key:
+          type: string
+        kind:
+          type: string
+        payload:
+          $ref: '#/components/schemas/AnyJSON'
+        definition_id:
+          type: string
+          format: uuid
+
+    LeaseRequest:
+      type: object
+      required: [worker_id, max_jobs]
+      properties:
+        worker_id:
+          type: string
+          minLength: 1
+          example: worker-a
+        max_jobs:
+          type: integer
+          minimum: 1
+          default: 4
+
+    LeaseResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/QueueItem'
+
+    ReportResultRequest:
+      type: object
+      required: [worker_id, queue_id, job_id, success]
+      properties:
+        worker_id:
+          type: string
+        queue_id:
+          type: integer
+          format: int64
+        job_id:
+          type: integer
+          format: int64
+        success:
+          type: boolean
+        error:
+          type: string
+          description: Optional failure text when success is false.
+
+    GlobalCycleCheckResponse:
+      type: object
+      description: |
+        Administrative global cycle check response. The current implementation returns
+        a map[string]any, so this schema is intentionally flexible while still
+        remaining valid OpenAPI.
+      additionalProperties: true
+      example:
+        has_cycle: false
+        checked_at: '2026-03-08T22:00:00Z'
+        cycle_path: []
+
+    RunStatus:
+      type: string
+      enum: [waiting, running, succeeded, failed, missed, cancelled]
+
+    JobStatus:
+      type: string
+      enum: [waiting, queued, running, succeeded, failed, missed, cancelled, skipped]

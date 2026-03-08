@@ -308,7 +308,7 @@ The active DAG version is enforced through `dags.active_version_id`. Scheduled o
 ## Running the demo
 
 ```bash
-docker compose up --build
+docker compose up --build -d
 ```
 
 Useful logs:
@@ -319,3 +319,23 @@ docker compose logs -f scheduler
 docker compose logs -f worker
 docker compose logs -f python-service
 ```
+## Expected Python service output
+
+The `python-service` logs should look roughly like:
+
+```
+python-service-1  | INFO:     Started server process [1]
+python-service-1  | INFO:     Waiting for application startup.
+python-service-1  | INFO:     Application startup complete.
+python-service-1  | INFO:     Uvicorn running on http://0.0.0.0:8090 (Press CTRL+C to quit)
+python-service-1  | INFO:     <IP:PORT> - "POST /jobs/hello-5s HTTP/1.1" 200 OK
+python-service-1  | INFO:     <IP:PORT> - "POST /jobs/hello-10s HTTP/1.1" 200 OK
+python-service-1  | INFO:     <IP:PORT> - "POST /jobs/hello-5s HTTP/1.1" 200 OK
+python-service-1  | INFO:     <IP:PORT> - "POST /jobs/hello-5s HTTP/1.1" 200 OK
+python-service-1  | INFO:     <IP:PORT> - "POST /jobs/hello-10s HTTP/1.1" 200 OK
+python-service-1  | INFO:     Shutting down
+python-service-1  | INFO:     Waiting for application shutdown.
+python-service-1  | INFO:     Application shutdown complete.
+```
+
+The exact IP and port values depend on the container network.

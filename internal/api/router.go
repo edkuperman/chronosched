@@ -8,6 +8,9 @@ import (
 func NewHTTPHandler(h *Handler) http.Handler {
 	r := chi.NewRouter()
 	r.Get("/healthz", h.healthz)
+
+	r.Get("/", swaggerUIHandler("/openapi/chronosched.yaml"))
+	r.Handle("/openapi/*", http.StripPrefix("/openapi/", http.FileServer(http.Dir("openapi"))))
 	r.Route("/api/v2", func(r chi.Router) {
 		r.Get("/namespaces", h.listNamespaces)
 		r.Post("/namespaces", h.createNamespace)

@@ -4,7 +4,7 @@ import requests
 
 class ChronoschedClient:
     def __init__(self, base_url: str | None = None):
-        self.base_url = (base_url or os.getenv("CHRONOSCHED_BASE") or "http://localhost:8080").rstrip("/")
+        self.base_url = (base_url or os.getenv("CHRONOSCHED_BASE_URL") or "http://localhost:8080").rstrip("/")
         self.session = requests.Session()
 
     def _url(self, path: str) -> str:

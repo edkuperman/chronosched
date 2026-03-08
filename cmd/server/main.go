@@ -36,8 +36,21 @@ func main() {
 		Admin:       sql.NewAdminSQL(dal),
 	}
 
-	srv := &http.Server{Addr: ":8080", Handler: api.NewHTTPHandler(api.NewHandler(repos))}
-	logger.Info("chronosched v2 listening on :8080")
+
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	addr := ":" + port
+
+	srv := &http.Server{
+		Addr:    addr,
+		Handler: api.NewHTTPHandler(api.NewHandler(repos)),
+	}
+
+	logger.Info("chronosched v2 listening", "addr", addr)
+
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		logger.Error(err, "server error")
 		os.Exit(1)

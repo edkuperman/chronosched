@@ -9,7 +9,7 @@ from fastapi import FastAPI, Request
 
 from chronosched_client import ChronoschedClient
 
-BASE_URL = os.getenv("CHRONOSCHED_BASE", "http://server:8080")
+BASE_URL = os.getenv("CHRONOSCHED_BASE_URL", "http://server:8080")
 SERVICE_PORT = int(os.getenv("PORT", "8090"))
 SERVICE_HOST = os.getenv("SERVICE_HOST", "python-service")
 

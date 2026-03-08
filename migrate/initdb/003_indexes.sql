@@ -1,1 +1,0 @@
--- indexes moved into 002_schema.sql

@@ -22,11 +22,12 @@ services:
       dockerfile: Dockerfile.server
     environment:
       DATABASE_URL: postgres://postgres:postgres@db:5432/chronosched?sslmode=disable
+      PORT: ${SERVER_PORT:-8080}
     depends_on:
       db:
         condition: service_healthy
     ports:
-      - "8080:8080"
+      - "${SERVER_PORT:-8080}:${SERVER_PORT:-8080}"
 
   scheduler:
     build:
@@ -43,7 +44,7 @@ services:
       context: .
       dockerfile: Dockerfile.worker
     environment:
-      CHRONOSCHED_BASE_URL: http://server:8080
+      CHRONOSCHED_BASE_URL: ${CHRONOSCHED_BASE_URL:-http://server:${SERVER_PORT:-8080}}
     depends_on:
       server:
         condition: service_started
@@ -56,7 +57,7 @@ services:
       dockerfile: Dockerfile.python
     environment:
       PYTHONUNBUFFERED: "1"
-      CHRONOSCHED_BASE: http://server:8080
+      CHRONOSCHED_BASE_URL: ${CHRONOSCHED_BASE_URL:-http://server:${SERVER_PORT:-8080}}
       SERVICE_HOST: python-service
       PORT: "8090"
     depends_on:
