@@ -409,22 +409,25 @@ func (h *Handler) leaseJobs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, leaseResponse{Items: items})
 }
 
-type resultRequest struct {
-	WorkerID string `json:"worker_id"`
-	QueueID  int64  `json:"queue_id"`
-	JobID    int64  `json:"job_id"`
-	Success  bool   `json:"success"`
-	Error    string `json:"error"`
+type dispatchResultRequest struct {
+	WorkerID            string `json:"worker_id"`
+	QueueID             int64  `json:"queue_id"`
+	JobID               int64  `json:"job_id"`
+	Success             bool   `json:"success"`
+	Retryable           bool   `json:"retryable"`
+	ReasonCode          string `json:"reason_code,omitempty"`
+	ReasonDetail        string `json:"reason_detail,omitempty"`
+	ExternalExecutionID string `json:"external_execution_id,omitempty"`
 }
 
-func (h *Handler) reportResult(w http.ResponseWriter, r *http.Request) {
-	var req resultRequest
+func (h *Handler) reportDispatchResult(w http.ResponseWriter, r *http.Request) {
+	var req dispatchResultRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
 	if req.Success {
-		if err := h.Repos.Jobs.MarkSucceeded(r.Context(), req.JobID); err != nil {
+		if err := h.Repos.Jobs.RecordDispatchAccepted(r.Context(), req.JobID, req.ExternalExecutionID); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -432,12 +435,8 @@ func (h *Handler) reportResult(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-	} else {
-		if err := h.Repos.Jobs.MarkFailed(r.Context(), req.JobID, req.Error); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		if err := h.Repos.Definitions.ApplyFailurePolicy(r.Context(), req.JobID); err != nil {
+	} else if req.Retryable {
+		if err := h.Repos.Jobs.RecordDispatchRetry(r.Context(), req.JobID, req.ReasonCode, req.ReasonDetail); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -445,8 +444,60 @@ func (h *Handler) reportResult(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+	} else {
+		if err := h.Repos.Jobs.RecordDispatchFailed(r.Context(), req.JobID, req.ReasonCode, req.ReasonDetail); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		_ = h.Repos.Queue.Ack(r.Context(), req.QueueID, req.WorkerID)
 	}
 	if runID, err := h.Repos.Jobs.GetRunID(r.Context(), req.JobID); err == nil {
+		_ = h.Repos.Runs.RefreshStatus(r.Context(), runID)
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type jobEventRequest struct {
+	Status              string     `json:"status"`
+	ExternalExecutionID string     `json:"external_execution_id,omitempty"`
+	HeartbeatAt         *time.Time `json:"heartbeat_at,omitempty"`
+	ReasonCode          string     `json:"reason_code,omitempty"`
+	ReasonDetail        string     `json:"reason_detail,omitempty"`
+}
+
+func (h *Handler) postJobEvent(w http.ResponseWriter, r *http.Request) {
+	jobID, err := parseInt64Param(r, "job_id")
+	if err != nil {
+		http.Error(w, "invalid job_id", http.StatusBadRequest)
+		return
+	}
+	var req jobEventRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	switch req.Status {
+	case "started":
+		err = h.Repos.Jobs.RecordStarted(r.Context(), jobID, req.ExternalExecutionID)
+	case "heartbeat":
+		hb := time.Now().UTC()
+		if req.HeartbeatAt != nil {
+			hb = req.HeartbeatAt.UTC()
+		}
+		err = h.Repos.Jobs.RecordHeartbeat(r.Context(), jobID, hb, req.ReasonDetail)
+	case "succeeded":
+		err = h.Repos.Jobs.RecordCompletion(r.Context(), jobID, true, req.ReasonCode, req.ReasonDetail)
+	case "failed":
+		err = h.Repos.Jobs.RecordCompletion(r.Context(), jobID, false, req.ReasonCode, req.ReasonDetail)
+	default:
+		http.Error(w, "unsupported status", http.StatusBadRequest)
+		return
+	}
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if runID, err := h.Repos.Jobs.GetRunID(r.Context(), jobID); err == nil {
 		_ = h.Repos.Runs.RefreshStatus(r.Context(), runID)
 	}
 	w.WriteHeader(http.StatusNoContent)

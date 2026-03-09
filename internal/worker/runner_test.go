@@ -13,30 +13,31 @@ import (
 )
 
 func TestExecuteREST_SuccessAndHeaders(t *testing.T) {
-	var gotJobID, gotNodeKey, gotDef string
+	var gotJobID, gotNodeKey, gotDef, gotCallbackBase string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotJobID = r.Header.Get("X-Chronosched-Job-ID")
 		gotNodeKey = r.Header.Get("X-Chronosched-Node-Key")
 		gotDef = r.Header.Get("X-Chronosched-Definition-ID")
+		gotCallbackBase = r.Header.Get("X-Chronosched-Callback-Base")
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"success":true,"message":"ok"}`))
+		_, _ = w.Write([]byte(`{"accepted":true,"external_execution_id":"ex1"}`))
 	}))
 	defer srv.Close()
 
 	payload, _ := json.Marshal(map[string]any{"url": srv.URL, "body": map[string]any{"x": 1}})
 	r := NewRunner("http://example", "worker-1")
-	success, msg := r.executeREST(context.Background(), repository.QueueItem{JobID: 7, NodeKey: "hello", Definition: "def1", Payload: payload})
-	if !success || msg != "ok" {
-		t.Fatalf("expected success/ok, got %v/%q", success, msg)
+	success, retryable, reasonCode, reasonDetail, externalExecutionID := r.executeREST(context.Background(), repository.QueueItem{JobID: 7, NodeKey: "hello", Definition: "def1", Payload: payload})
+	if !success || retryable || reasonCode != "" || reasonDetail != "" || externalExecutionID != "ex1" {
+		t.Fatalf("unexpected dispatch result: %v %v %q %q %q", success, retryable, reasonCode, reasonDetail, externalExecutionID)
 	}
-	if gotJobID != "7" || gotNodeKey != "hello" || gotDef != "def1" {
-		t.Fatalf("unexpected propagated headers: %q %q %q", gotJobID, gotNodeKey, gotDef)
+	if gotJobID != "7" || gotNodeKey != "hello" || gotDef != "def1" || gotCallbackBase == "" {
+		t.Fatalf("unexpected propagated headers: %q %q %q %q", gotJobID, gotNodeKey, gotDef, gotCallbackBase)
 	}
 }
 
 func TestExecuteREST_FailureCases(t *testing.T) {
 	r := NewRunner("http://example", "worker-1")
-	if ok, msg := r.executeREST(context.Background(), repository.QueueItem{Payload: []byte(`{"body":{}}`)}); ok || msg == "" {
+	if ok, _, _, msg, _ := r.executeREST(context.Background(), repository.QueueItem{Payload: []byte(`{"body":{}}`)}); ok || msg == "" {
 		t.Fatalf("expected missing url failure, got ok=%v msg=%q", ok, msg)
 	}
 
@@ -45,14 +46,14 @@ func TestExecuteREST_FailureCases(t *testing.T) {
 	}))
 	defer badSrv.Close()
 	payload, _ := json.Marshal(map[string]any{"url": badSrv.URL})
-	if ok, msg := r.executeREST(context.Background(), repository.QueueItem{Payload: payload}); ok || msg == "" {
-		t.Fatalf("expected callback failure, got ok=%v msg=%q", ok, msg)
+	if ok, retryable, _, msg, _ := r.executeREST(context.Background(), repository.QueueItem{Payload: payload}); ok || !retryable || msg == "" {
+		t.Fatalf("expected retryable dispatch failure, got ok=%v retryable=%v msg=%q", ok, retryable, msg)
 	}
 }
 
 func TestPollOnce_LeasesAndReportsResult(t *testing.T) {
 	var mu sync.Mutex
-	var reported []resultRequest
+	var reported []dispatchResultRequest
 	leasePayload, _ := json.Marshal(leaseResponse{Items: []repository.QueueItem{{QueueID: 11, JobID: 22, NodeKey: "hello", Kind: "rest", Definition: "def1", Payload: json.RawMessage(`{"url":"http://placeholder"}`)}}})
 
 	var serverURL string
@@ -64,9 +65,9 @@ func TestPollOnce_LeasesAndReportsResult(t *testing.T) {
 			resp.Items[0].Payload = json.RawMessage(`{"url":"` + serverURL + `/callback"}`)
 			_ = json.NewEncoder(w).Encode(resp)
 		case "/callback":
-			_, _ = w.Write([]byte(`{"success":true}`))
-		case "/internal/workers/result":
-			var rr resultRequest
+			_, _ = w.Write([]byte(`{"accepted":true,"external_execution_id":"ex-22"}`))
+		case "/internal/workers/dispatch-result":
+			var rr dispatchResultRequest
 			_ = json.NewDecoder(r.Body).Decode(&rr)
 			mu.Lock()
 			reported = append(reported, rr)
@@ -99,7 +100,7 @@ func TestPollOnce_LeasesAndReportsResult(t *testing.T) {
 	if len(reported) != 1 {
 		t.Fatalf("expected one reported result, got %d", len(reported))
 	}
-	if !reported[0].Success || reported[0].QueueID != 11 || reported[0].JobID != 22 {
+	if !reported[0].Success || reported[0].QueueID != 11 || reported[0].JobID != 22 || reported[0].ExternalExecutionID != "ex-22" {
 		t.Fatalf("unexpected reported payload: %#v", reported[0])
 	}
 }

@@ -11,7 +11,7 @@ func NewHTTPHandler(h *Handler) http.Handler {
 
 	r.Get("/", swaggerUIHandler("/openapi/chronosched.yaml"))
 	r.Handle("/openapi/*", http.StripPrefix("/openapi/", http.FileServer(http.Dir("openapi"))))
-	r.Route("/api/v2", func(r chi.Router) {
+	r.Route("/api/v1", func(r chi.Router) {
 		r.Get("/namespaces", h.listNamespaces)
 		r.Post("/namespaces", h.createNamespace)
 		r.Get("/namespaces/{name}", h.getNamespace)
@@ -46,12 +46,13 @@ func NewHTTPHandler(h *Handler) http.Handler {
 		r.Get("/runs/{run_id}/graph", h.getRunGraph)
 
 		r.Get("/jobs/{job_id}/readiness", h.getJobReadiness)
+		r.Post("/jobs/{job_id}/events", h.postJobEvent)
 		r.Get("/admin/check/global-cycles", h.checkGlobalCycles)
 	})
 
 	r.Route("/internal/workers", func(r chi.Router) {
 		r.Post("/lease", h.leaseJobs)
-		r.Post("/result", h.reportResult)
+		r.Post("/dispatch-result", h.reportDispatchResult)
 	})
 	return r
 }

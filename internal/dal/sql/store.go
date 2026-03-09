@@ -1067,7 +1067,7 @@ WHERE r.run_id=$1`, runID).
 func (s *Store) ListJobs(ctx context.Context, runID int64) ([]repository.RunJob, error) {
 	rows, err := s.dal.DB.Query(ctx, `
 SELECT j.job_id, j.run_id, j.node_key, j.display_name, j.job_definition_id::text, jd.name, j.status,
-       j.due_at, j.started_at, j.finished_at, j.last_error, COALESCE(f.ready, FALSE)
+       j.due_at, j.dispatched_at, j.started_at, j.last_heartbeat_at, j.finished_at, j.external_execution_id, j.reason_code, j.last_error, COALESCE(f.ready, FALSE)
 FROM jobs j
 JOIN job_definitions jd ON jd.definition_id=j.job_definition_id
 LEFT JOIN job_frontier f ON f.job_id=j.job_id
@@ -1080,14 +1080,18 @@ ORDER BY j.job_id`, runID)
 	var out []repository.RunJob
 	for rows.Next() {
 		var j repository.RunJob
-		var started, finished stdsql.NullTime
-		var lastErr stdsql.NullString
+		var dispatched, started, heartbeat, finished stdsql.NullTime
+		var externalID, reasonCode, lastErr stdsql.NullString
 		var ready bool
-		if err := rows.Scan(&j.JobID, &j.RunID, &j.NodeKey, &j.DisplayName, &j.JobDefinitionID, &j.JobDefinitionName, &j.Status, &j.DueAt, &started, &finished, &lastErr, &ready); err != nil {
+		if err := rows.Scan(&j.JobID, &j.RunID, &j.NodeKey, &j.DisplayName, &j.JobDefinitionID, &j.JobDefinitionName, &j.Status, &j.DueAt, &dispatched, &started, &heartbeat, &finished, &externalID, &reasonCode, &lastErr, &ready); err != nil {
 			return nil, err
 		}
+		j.DispatchedAt = timePtr(dispatched)
 		j.StartedAt = timePtr(started)
+		j.LastHeartbeatAt = timePtr(heartbeat)
 		j.FinishedAt = timePtr(finished)
+		j.ExternalExecutionID = nullStringPtr(externalID)
+		j.ReasonCode = nullStringPtr(reasonCode)
 		j.LastError = nullStringPtr(lastErr)
 		j.IsReady = &ready
 		out = append(out, j)
@@ -1136,9 +1140,9 @@ func (s *Store) RefreshStatus(ctx context.Context, runID int64) error {
 SELECT
   count(*) FILTER (WHERE status='waiting'),
   count(*) FILTER (WHERE status='queued'),
-  count(*) FILTER (WHERE status='running'),
+  count(*) FILTER (WHERE status IN ('dispatching','dispatched','running')),
   count(*) FILTER (WHERE status='succeeded'),
-  count(*) FILTER (WHERE status='failed'),
+  count(*) FILTER (WHERE status IN ('failed','lost')),
   count(*) FILTER (WHERE status='missed')
 FROM jobs WHERE run_id=$1`, runID).Scan(&waiting, &queued, &running, &succeeded, &failed, &missed)
 	if err != nil {
@@ -1170,10 +1174,10 @@ WHERE run_id=$1`, runID, status)
 func (s *Store) GetJobExecution(ctx context.Context, id int64) (*repository.JobExecution, error) {
 	var ex repository.JobExecution
 	err := s.dal.DB.QueryRow(ctx, `
-SELECT j.job_id, j.node_key, jd.kind, j.payload_json, j.job_definition_id::text
+SELECT j.job_id, j.run_id, j.node_key, jd.kind, j.payload_json, j.job_definition_id::text
 FROM jobs j
 JOIN job_definitions jd ON jd.definition_id=j.job_definition_id
-WHERE j.job_id=$1`, id).Scan(&ex.JobID, &ex.NodeKey, &ex.Kind, &ex.Payload, &ex.Definition)
+WHERE j.job_id=$1`, id).Scan(&ex.JobID, &ex.RunID, &ex.NodeKey, &ex.Kind, &ex.Payload, &ex.Definition)
 	if err != nil {
 		return nil, err
 	}
@@ -1208,22 +1212,47 @@ func (s *Store) MarkQueued(ctx context.Context, id int64) error {
 	return err
 }
 
-func (s *Store) MarkRunning(ctx context.Context, id int64) error {
-	_, err := s.dal.DB.Exec(ctx, `UPDATE jobs SET status='running', started_at=COALESCE(started_at, now()) WHERE job_id=$1`, id)
+func (s *Store) MarkDispatching(ctx context.Context, id int64, workerID string, leaseFor time.Duration) error {
+	_, err := s.dal.DB.Exec(ctx, `UPDATE jobs SET status='dispatching', lease_owner=$2, lease_until=now()+$3::interval WHERE job_id=$1 AND status='queued'`, id, workerID, leaseFor.String())
 	return err
 }
 
-func (s *Store) MarkSucceeded(ctx context.Context, id int64) error {
-	tx, err := s.dal.DB.Begin(ctx)
+func (s *Store) RecordDispatchAccepted(ctx context.Context, id int64, externalExecutionID string) error {
+	_, err := s.dal.DB.Exec(ctx, `UPDATE jobs SET status='dispatched', dispatched_at=now(), external_execution_id=NULLIF($2,''), reason_code=NULL, reason_detail=NULL, last_error=NULL, lease_owner=NULL, lease_until=NULL, dispatch_attempts=dispatch_attempts+1 WHERE job_id=$1`, id, externalExecutionID)
+	return err
+}
+
+func (s *Store) RecordDispatchRetry(ctx context.Context, id int64, reasonCode, reasonDetail string) error {
+	_, err := s.dal.DB.Exec(ctx, `UPDATE jobs SET status='queued', reason_code=$2, reason_detail=$3, last_error=$3, lease_owner=NULL, lease_until=NULL, dispatch_attempts=dispatch_attempts+1 WHERE job_id=$1`, id, reasonCode, reasonDetail)
+	return err
+}
+
+func (s *Store) RecordDispatchFailed(ctx context.Context, id int64, reasonCode, reasonDetail string) error {
+	_, err := s.dal.DB.Exec(ctx, `UPDATE jobs SET status='failed', finished_at=now(), reason_code=$2, reason_detail=$3, last_error=$3, lease_owner=NULL, lease_until=NULL, dispatch_attempts=dispatch_attempts+1 WHERE job_id=$1`, id, reasonCode, reasonDetail)
+	return err
+}
+
+func (s *Store) RecordStarted(ctx context.Context, id int64, externalExecutionID string) error {
+	_, err := s.dal.DB.Exec(ctx, `UPDATE jobs SET status='running', started_at=COALESCE(started_at, now()), last_heartbeat_at=now(), external_execution_id=COALESCE(NULLIF($2,''), external_execution_id), reason_code=NULL, reason_detail=NULL WHERE job_id=$1 AND status IN ('dispatched','running')`, id, externalExecutionID)
+	return err
+}
+
+func (s *Store) RecordHeartbeat(ctx context.Context, id int64, heartbeatAt time.Time, detail string) error {
+	_, err := s.dal.DB.Exec(ctx, `UPDATE jobs SET status=CASE WHEN status='dispatched' THEN 'running' ELSE status END, started_at=COALESCE(started_at, CASE WHEN status='dispatched' THEN now() ELSE started_at END), last_heartbeat_at=$2, reason_detail=CASE WHEN NULLIF($3,'') IS NULL THEN reason_detail ELSE $3 END WHERE job_id=$1 AND status IN ('dispatched','running')`, id, heartbeatAt, detail)
+	return err
+}
+
+func (s *Store) RecordCompletion(ctx context.Context, id int64, success bool, reasonCode, reasonDetail string) error {
+	status := repository.JobStatusSucceeded
+	if !success {
+		status = repository.JobStatusFailed
+	}
+	_, err := s.dal.DB.Exec(ctx, `UPDATE jobs SET status=$2::job_status, finished_at=now(), reason_code=NULLIF($3,''), reason_detail=NULLIF($4,''), last_error=NULLIF($4,''), lease_owner=NULL, lease_until=NULL WHERE job_id=$1 AND status IN ('dispatched','running')`, id, status, reasonCode, reasonDetail)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
-	_, err = tx.Exec(ctx, `UPDATE jobs SET status='succeeded', finished_at=now(), lease_owner=NULL, lease_until=NULL WHERE job_id=$1`, id)
-	if err != nil {
-		return err
-	}
-	_, err = tx.Exec(ctx, `
+	if success {
+		_, err = s.dal.DB.Exec(ctx, `
 UPDATE job_frontier f
 SET ready = NOT EXISTS (
     SELECT 1
@@ -1232,20 +1261,94 @@ SET ready = NOT EXISTS (
     WHERE d.child_job_id = f.job_id AND p.status <> 'succeeded'
 )
 WHERE f.job_id IN (SELECT child_job_id FROM job_dependencies WHERE parent_job_id=$1)`, id)
-	if err != nil {
-		return err
 	}
-	return tx.Commit(ctx)
-}
-
-func (s *Store) MarkFailed(ctx context.Context, id int64, reason string) error {
-	_, err := s.dal.DB.Exec(ctx, `UPDATE jobs SET status='failed', finished_at=now(), last_error=$2, lease_owner=NULL, lease_until=NULL WHERE job_id=$1`, id, reason)
 	return err
 }
 
-func (s *Store) MarkMissed(ctx context.Context, id int64, reason string) error {
-	_, err := s.dal.DB.Exec(ctx, `UPDATE jobs SET status='missed', finished_at=now(), last_error=$2, lease_owner=NULL, lease_until=NULL WHERE job_id=$1`, id, reason)
+func (s *Store) MarkLost(ctx context.Context, id int64, reasonCode, reasonDetail string) error {
+	_, err := s.dal.DB.Exec(ctx, `UPDATE jobs SET status='lost', finished_at=now(), reason_code=$2, reason_detail=$3, last_error=$3, lease_owner=NULL, lease_until=NULL WHERE job_id=$1 AND status IN ('dispatched','running','dispatching')`, id, reasonCode, reasonDetail)
 	return err
+}
+
+func (s *Store) MarkMissed(ctx context.Context, id int64, reasonCode, reasonDetail string) error {
+	_, err := s.dal.DB.Exec(ctx, `UPDATE jobs SET status='missed', finished_at=now(), reason_code=$2, reason_detail=$3, last_error=$3, lease_owner=NULL, lease_until=NULL WHERE job_id=$1`, id, reasonCode, reasonDetail)
+	return err
+}
+
+func (s *Store) FindWaitingBlockedByFailedDependency(ctx context.Context, before time.Time, limit int) ([]*repository.Job, error) {
+	rows, err := s.dal.DB.Query(ctx, `
+SELECT DISTINCT j.job_id, j.run_id, j.status, j.priority, j.due_at, j.node_key, j.job_definition_id::text
+FROM jobs j
+JOIN job_dependencies d ON d.child_job_id=j.job_id
+JOIN jobs p ON p.job_id=d.parent_job_id
+WHERE j.status='waiting' AND j.due_at <= $1 AND p.status IN ('failed','lost','missed','cancelled','skipped')
+ORDER BY j.due_at, j.job_id
+LIMIT $2`, before, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*repository.Job
+	for rows.Next() {
+		var j repository.Job
+		if err := rows.Scan(&j.ID, &j.RunID, &j.Status, &j.Priority, &j.DueAt, &j.NodeKey, &j.DefID); err != nil {
+			return nil, err
+		}
+		out = append(out, &j)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) FindStaleDispatched(ctx context.Context, before time.Time, limit int) ([]*repository.Job, error) {
+	rows, err := s.dal.DB.Query(ctx, `SELECT job_id, run_id, status, priority, due_at, node_key, job_definition_id::text, dispatched_at, started_at, last_heartbeat_at, finished_at, external_execution_id, reason_code, reason_detail FROM jobs WHERE status='dispatched' AND dispatched_at IS NOT NULL AND dispatched_at <= $1 ORDER BY dispatched_at LIMIT $2`, before, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*repository.Job
+	for rows.Next() {
+		var j repository.Job
+		var dispatched, started, heartbeat, finished stdsql.NullTime
+		var externalID, reasonCode, reasonDetail stdsql.NullString
+		if err := rows.Scan(&j.ID, &j.RunID, &j.Status, &j.Priority, &j.DueAt, &j.NodeKey, &j.DefID, &dispatched, &started, &heartbeat, &finished, &externalID, &reasonCode, &reasonDetail); err != nil {
+			return nil, err
+		}
+		j.DispatchedAt = timePtr(dispatched)
+		j.StartedAt = timePtr(started)
+		j.LastHeartbeatAt = timePtr(heartbeat)
+		j.FinishedAt = timePtr(finished)
+		j.ExternalExecutionID = nullStringPtr(externalID)
+		j.ReasonCode = nullStringPtr(reasonCode)
+		j.ReasonDetail = nullStringPtr(reasonDetail)
+		out = append(out, &j)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) FindStaleRunning(ctx context.Context, before time.Time, limit int) ([]*repository.Job, error) {
+	rows, err := s.dal.DB.Query(ctx, `SELECT job_id, run_id, status, priority, due_at, node_key, job_definition_id::text, dispatched_at, started_at, last_heartbeat_at, finished_at, external_execution_id, reason_code, reason_detail FROM jobs WHERE status='running' AND COALESCE(last_heartbeat_at, started_at) IS NOT NULL AND COALESCE(last_heartbeat_at, started_at) <= $1 ORDER BY COALESCE(last_heartbeat_at, started_at) LIMIT $2`, before, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*repository.Job
+	for rows.Next() {
+		var j repository.Job
+		var dispatched, started, heartbeat, finished stdsql.NullTime
+		var externalID, reasonCode, reasonDetail stdsql.NullString
+		if err := rows.Scan(&j.ID, &j.RunID, &j.Status, &j.Priority, &j.DueAt, &j.NodeKey, &j.DefID, &dispatched, &started, &heartbeat, &finished, &externalID, &reasonCode, &reasonDetail); err != nil {
+			return nil, err
+		}
+		j.DispatchedAt = timePtr(dispatched)
+		j.StartedAt = timePtr(started)
+		j.LastHeartbeatAt = timePtr(heartbeat)
+		j.FinishedAt = timePtr(finished)
+		j.ExternalExecutionID = nullStringPtr(externalID)
+		j.ReasonCode = nullStringPtr(reasonCode)
+		j.ReasonDetail = nullStringPtr(reasonDetail)
+		out = append(out, &j)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) GetReadiness(ctx context.Context, id int64) (*repository.JobReadiness, error) {
@@ -1330,7 +1433,7 @@ RETURNING q.id, q.job_id, q.attempts, q.priority, j.node_key, jd.kind, j.payload
 		jobIDs = append(jobIDs, it.JobID)
 	}
 	for _, jobID := range jobIDs {
-		if _, err := tx.Exec(ctx, `UPDATE jobs SET status='running', started_at=COALESCE(started_at, now()), lease_owner=$2, lease_until=now()+$3::interval WHERE job_id=$1`, jobID, workerID, vt.String()); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE jobs SET status='dispatching', lease_owner=$2, lease_until=now()+$3::interval WHERE job_id=$1`, jobID, workerID, vt.String()); err != nil {
 			return nil, err
 		}
 	}

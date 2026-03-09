@@ -37,18 +37,22 @@ type DAGRun struct {
 }
 
 type RunJob struct {
-	JobID             int64      `json:"job_id"`
-	RunID             int64      `json:"run_id"`
-	NodeKey           string     `json:"node_key"`
-	DisplayName       string     `json:"display_name"`
-	JobDefinitionID   string     `json:"job_definition_id"`
-	JobDefinitionName string     `json:"job_definition_name,omitempty"`
-	Status            JobStatus  `json:"status"`
-	DueAt             time.Time  `json:"due_at"`
-	StartedAt         *time.Time `json:"started_at,omitempty"`
-	FinishedAt        *time.Time `json:"finished_at,omitempty"`
-	LastError         *string    `json:"last_error,omitempty"`
-	IsReady           *bool      `json:"is_ready,omitempty"`
+	JobID               int64      `json:"job_id"`
+	RunID               int64      `json:"run_id"`
+	NodeKey             string     `json:"node_key"`
+	DisplayName         string     `json:"display_name"`
+	JobDefinitionID     string     `json:"job_definition_id"`
+	JobDefinitionName   string     `json:"job_definition_name,omitempty"`
+	Status              JobStatus  `json:"status"`
+	DueAt               time.Time  `json:"due_at"`
+	DispatchedAt        *time.Time `json:"dispatched_at,omitempty"`
+	StartedAt           *time.Time `json:"started_at,omitempty"`
+	LastHeartbeatAt     *time.Time `json:"last_heartbeat_at,omitempty"`
+	FinishedAt          *time.Time `json:"finished_at,omitempty"`
+	ExternalExecutionID *string    `json:"external_execution_id,omitempty"`
+	ReasonCode          *string    `json:"reason_code,omitempty"`
+	LastError           *string    `json:"last_error,omitempty"`
+	IsReady             *bool      `json:"is_ready,omitempty"`
 }
 
 type RunGraphEdge struct {

@@ -10,15 +10,26 @@ import (
 	cronlib "github.com/robfig/cron/v3"
 )
 
+type parentCheckResult int
+
+const (
+	parentCheckBlocked parentCheckResult = iota
+	parentCheckReady
+	parentCheckImpossible
+)
+
 type Scheduler struct {
-	repos     *repository.Repos
-	cron      *cronlib.Cron
-	batchSize int
+	repos              *repository.Repos
+	cron               *cronlib.Cron
+	batchSize          int
+	startTimeout       time.Duration
+	heartbeatTimeout   time.Duration
+	dependencySweepLag time.Duration
 }
 
 func NewScheduler(repos *repository.Repos) *Scheduler {
 	c := cronlib.New(cronlib.WithSeconds())
-	s := &Scheduler{repos: repos, cron: c, batchSize: 128}
+	s := &Scheduler{repos: repos, cron: c, batchSize: 128, startTimeout: 30 * time.Second, heartbeatTimeout: 60 * time.Second, dependencySweepLag: 1 * time.Second}
 	_, _ = c.AddFunc("@every 1s", func() {
 		if err := s.tick(context.Background()); err != nil {
 			logger.Error(err, "scheduler tick error")
@@ -41,7 +52,13 @@ func (s *Scheduler) tick(ctx context.Context) error {
 	if err := s.materializeScheduledRuns(ctx); err != nil {
 		return err
 	}
-	return s.enqueueReadyJobs(ctx)
+	if err := s.enqueueReadyJobs(ctx); err != nil {
+		return err
+	}
+	if err := s.sweepBlockedJobs(ctx); err != nil {
+		return err
+	}
+	return s.reapLostJobs(ctx)
 }
 
 func parseCronSchedule(spec string) (cronlib.Schedule, error) {
@@ -119,59 +136,64 @@ func nextScheduledTime(u repository.ScheduledUsage, fireAt time.Time) (time.Time
 	}
 }
 
-func scheduledParentsSatisfied(ctx context.Context, repos *repository.Repos, runID int64) (bool, error) {
+func scheduledParentsSatisfied(ctx context.Context, repos *repository.Repos, runID int64) (parentCheckResult, string, error) {
 	meta, err := repos.Runs.GetSchedulingMeta(ctx, runID)
 	if err != nil {
-		return false, err
+		return parentCheckBlocked, "", err
 	}
 	if meta.TriggerNodeID == "" {
-		return true, nil
+		return parentCheckReady, "", nil
 	}
 	if meta.TriggerType != "cron" && meta.TriggerType != "interval" {
-		return true, nil
+		return parentCheckReady, "", nil
 	}
 	parents, err := repos.Definitions.ListScheduledParents(ctx, meta.DAGVersionID, meta.TriggerNodeID)
 	if err != nil {
-		return false, err
+		return parentCheckBlocked, "", err
 	}
 	for _, parent := range parents {
 		if !parent.DefinitionEnabled || parent.DefinitionPaused {
-			return false, nil
+			return parentCheckImpossible, fmt.Sprintf("scheduled parent %s is disabled or paused", parent.NodeKey), nil
 		}
-
 		var requiredAt time.Time
 		switch parent.ScheduleType {
 		case "", "cron":
 			if parent.CronSpec == "" {
-				return false, nil
+				return parentCheckImpossible, fmt.Sprintf("scheduled parent %s has no cron spec", parent.NodeKey), nil
 			}
 			ps, err := parseCronSchedule(parent.CronSpec)
 			if err != nil {
-				return false, err
+				return parentCheckBlocked, "", err
 			}
 			requiredAt = prevOrSame(ps, meta.ScheduledAt.UTC())
 		case "interval":
 			if parent.IntervalSeconds == nil || *parent.IntervalSeconds <= 0 || parent.StartAt == nil {
-				return false, nil
+				return parentCheckImpossible, fmt.Sprintf("scheduled parent %s has invalid interval schedule", parent.NodeKey), nil
 			}
 			var ok bool
 			requiredAt, ok = intervalPrevOrSame(parent.StartAt.UTC(), *parent.IntervalSeconds, meta.ScheduledAt.UTC())
 			if !ok {
-				return false, nil
+				return parentCheckImpossible, fmt.Sprintf("scheduled parent %s has no occurrence for child time", parent.NodeKey), nil
 			}
 		default:
-			return false, nil
+			return parentCheckImpossible, fmt.Sprintf("scheduled parent %s has unsupported schedule type %s", parent.NodeKey, parent.ScheduleType), nil
 		}
-
 		st, err := repos.Definitions.GetCronFireStatus(ctx, parent.NodeID, requiredAt)
 		if err != nil {
-			return false, err
+			return parentCheckBlocked, "", err
 		}
-		if !st.Exists || st.Status != repository.RunStatusSucceeded {
-			return false, nil
+		if !st.Exists {
+			return parentCheckBlocked, fmt.Sprintf("waiting for scheduled parent %s at %s", parent.NodeKey, requiredAt.Format(time.RFC3339)), nil
 		}
+		if st.Status == repository.RunStatusSucceeded {
+			continue
+		}
+		if st.Status == repository.RunStatusFailed || st.Status == repository.RunStatusMissed || st.Status == repository.RunStatusCancelled {
+			return parentCheckImpossible, fmt.Sprintf("scheduled parent %s at %s finished with %s", parent.NodeKey, requiredAt.Format(time.RFC3339), st.Status), nil
+		}
+		return parentCheckBlocked, fmt.Sprintf("waiting for scheduled parent %s at %s", parent.NodeKey, requiredAt.Format(time.RFC3339)), nil
 	}
-	return true, nil
+	return parentCheckReady, "", nil
 }
 
 func (s *Scheduler) materializeScheduledRuns(ctx context.Context) error {
@@ -217,18 +239,26 @@ func (s *Scheduler) materializeScheduledRuns(ctx context.Context) error {
 }
 
 func (s *Scheduler) enqueueReadyJobs(ctx context.Context) error {
-	now := time.Now()
+	now := time.Now().UTC()
 	jobs, err := s.repos.Jobs.FindDueReadyWaiting(ctx, now, s.batchSize)
 	if err != nil {
 		return err
 	}
 	for _, j := range jobs {
-		ready, err := scheduledParentsSatisfied(ctx, s.repos, j.RunID)
+		decision, reason, err := scheduledParentsSatisfied(ctx, s.repos, j.RunID)
 		if err != nil {
 			logger.Error(err, "scheduled parent readiness check failed", "jobID", j.ID, "runID", j.RunID)
 			continue
 		}
-		if !ready {
+		switch decision {
+		case parentCheckBlocked:
+			continue
+		case parentCheckImpossible:
+			if err := s.repos.Jobs.MarkMissed(ctx, j.ID, "failed_dependency", reason); err == nil {
+				if runID, err := s.repos.Jobs.GetRunID(ctx, j.ID); err == nil {
+					_ = s.repos.Runs.RefreshStatus(ctx, runID)
+				}
+			}
 			continue
 		}
 		if err := s.repos.Jobs.MarkQueued(ctx, j.ID); err != nil {
@@ -238,6 +268,53 @@ func (s *Scheduler) enqueueReadyJobs(ctx context.Context) error {
 		if err := s.repos.Queue.Enqueue(ctx, j.ID, j.DueAt, j.Priority); err != nil {
 			logger.Error(err, "enqueue failed", "jobID", j.ID)
 			continue
+		}
+	}
+	return nil
+}
+
+func (s *Scheduler) sweepBlockedJobs(ctx context.Context) error {
+	jobs, err := s.repos.Jobs.FindWaitingBlockedByFailedDependency(ctx, time.Now().UTC().Add(-s.dependencySweepLag), s.batchSize)
+	if err != nil {
+		return err
+	}
+	for _, j := range jobs {
+		if err := s.repos.Jobs.MarkMissed(ctx, j.ID, "failed_dependency", "an upstream dependency completed without success"); err != nil {
+			logger.Error(err, "mark missed failed", "jobID", j.ID)
+			continue
+		}
+		if runID, err := s.repos.Jobs.GetRunID(ctx, j.ID); err == nil {
+			_ = s.repos.Runs.RefreshStatus(ctx, runID)
+		}
+	}
+	return nil
+}
+
+func (s *Scheduler) reapLostJobs(ctx context.Context) error {
+	dispatched, err := s.repos.Jobs.FindStaleDispatched(ctx, time.Now().UTC().Add(-s.startTimeout), s.batchSize)
+	if err != nil {
+		return err
+	}
+	for _, j := range dispatched {
+		if err := s.repos.Jobs.MarkLost(ctx, j.ID, "start_timeout", "job was dispatched but never reported started"); err != nil {
+			logger.Error(err, "mark lost (start timeout) failed", "jobID", j.ID)
+			continue
+		}
+		if runID, err := s.repos.Jobs.GetRunID(ctx, j.ID); err == nil {
+			_ = s.repos.Runs.RefreshStatus(ctx, runID)
+		}
+	}
+	running, err := s.repos.Jobs.FindStaleRunning(ctx, time.Now().UTC().Add(-s.heartbeatTimeout), s.batchSize)
+	if err != nil {
+		return err
+	}
+	for _, j := range running {
+		if err := s.repos.Jobs.MarkLost(ctx, j.ID, "heartbeat_timeout", "job stopped sending heartbeats"); err != nil {
+			logger.Error(err, "mark lost (heartbeat timeout) failed", "jobID", j.ID)
+			continue
+		}
+		if runID, err := s.repos.Jobs.GetRunID(ctx, j.ID); err == nil {
+			_ = s.repos.Runs.RefreshStatus(ctx, runID)
 		}
 	}
 	return nil

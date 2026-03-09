@@ -110,7 +110,7 @@ func TestCreateNamespace(t *testing.T) {
 	h := NewHandler(&repository.Repos{Namespaces: nsRepo})
 	rr := httptest.NewRecorder()
 	body := bytes.NewBufferString(`{"name":"demo"}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/v2/namespaces", body)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/namespaces", body)
 
 	h.createNamespace(rr, req)
 
@@ -128,7 +128,7 @@ func TestCreateDefinition_DefaultKindAndEnabled(t *testing.T) {
 	rr := httptest.NewRecorder()
 	payload := map[string]any{"namespace_id": "ns1", "name": "hello", "payload_template": map[string]any{"ok": true}}
 	data, _ := json.Marshal(payload)
-	req := httptest.NewRequest(http.MethodPost, "/api/v2/job-definitions", bytes.NewReader(data))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/job-definitions", bytes.NewReader(data))
 
 	h.createDefinition(rr, req)
 

@@ -103,14 +103,28 @@ type fakeJobs struct {
 func (f *fakeJobs) FindDueReadyWaiting(context.Context, time.Time, int) ([]*repository.Job, error) {
 	return f.jobs, nil
 }
+func (f *fakeJobs) FindWaitingBlockedByFailedDependency(context.Context, time.Time, int) ([]*repository.Job, error) {
+	return nil, nil
+}
+func (f *fakeJobs) FindStaleDispatched(context.Context, time.Time, int) ([]*repository.Job, error) {
+	return nil, nil
+}
+func (f *fakeJobs) FindStaleRunning(context.Context, time.Time, int) ([]*repository.Job, error) {
+	return nil, nil
+}
 func (f *fakeJobs) MarkQueued(_ context.Context, id int64) error {
 	f.queued = append(f.queued, id)
 	return nil
 }
-func (f *fakeJobs) MarkRunning(context.Context, int64) error        { return nil }
-func (f *fakeJobs) MarkSucceeded(context.Context, int64) error      { return nil }
-func (f *fakeJobs) MarkFailed(context.Context, int64, string) error { return nil }
-func (f *fakeJobs) MarkMissed(context.Context, int64, string) error { return nil }
+func (f *fakeJobs) MarkDispatching(context.Context, int64, string, time.Duration) error { return nil }
+func (f *fakeJobs) RecordDispatchAccepted(context.Context, int64, string) error         { return nil }
+func (f *fakeJobs) RecordDispatchRetry(context.Context, int64, string, string) error    { return nil }
+func (f *fakeJobs) RecordDispatchFailed(context.Context, int64, string, string) error   { return nil }
+func (f *fakeJobs) RecordStarted(context.Context, int64, string) error                  { return nil }
+func (f *fakeJobs) RecordHeartbeat(context.Context, int64, time.Time, string) error     { return nil }
+func (f *fakeJobs) RecordCompletion(context.Context, int64, bool, string, string) error { return nil }
+func (f *fakeJobs) MarkLost(context.Context, int64, string, string) error               { return nil }
+func (f *fakeJobs) MarkMissed(context.Context, int64, string, string) error             { return nil }
 func (f *fakeJobs) GetReadiness(context.Context, int64) (*repository.JobReadiness, error) {
 	return nil, nil
 }
@@ -179,11 +193,11 @@ func TestScheduledParentsSatisfied_CronAndInterval(t *testing.T) {
 	}}
 	runs := &fakeRuns{meta: &repository.RunSchedulingMeta{TriggerType: "cron", DAGVersionID: "dv1", TriggerNodeID: "child", ScheduledAt: time.Date(2026, 3, 6, 12, 0, 27, 0, time.UTC)}}
 	repos := &repository.Repos{Definitions: defs, Runs: runs}
-	ok, err := scheduledParentsSatisfied(context.Background(), repos, 1)
+	result, _, err := scheduledParentsSatisfied(context.Background(), repos, 1)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !ok {
+	if result != parentCheckReady {
 		t.Fatal("expected parents to be satisfied")
 	}
 }

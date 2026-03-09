@@ -37,7 +37,7 @@ func main() {
 	}
 
 
-	port := os.Getenv("PORT")
+	port := os.Getenv("SERVER_PORT")
 	if port == "" {
 		port = "8080"
 	}
@@ -49,7 +49,7 @@ func main() {
 		Handler: api.NewHTTPHandler(api.NewHandler(repos)),
 	}
 
-	logger.Info("chronosched v2 listening", "addr", addr)
+	logger.Info("chronosched listening", "addr", addr)
 
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		logger.Error(err, "server error")

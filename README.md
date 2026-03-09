@@ -1,341 +1,475 @@
-# Chronosched v2
+# Chronosched
 
-Chronosched is an experimental Postgres-backed scheduler built around four core ideas:
+Chronosched is a PostgreSQL-backed DAG scheduler written in Go.
 
-- **work definitions are reusable**
-- **scheduling belongs to the work definition**
-- **dependencies belong to a versioned DAG**
-- **runs materialize runtime jobs from an enabled DAG version**
+It separates three concerns that are often conflated in simpler schedulers:
 
-## Model
+- **job definitions** describe reusable work
+- **schedules** belong to job definitions
+- **DAG versions** define orchestration and dependencies
+
+At runtime, the scheduler creates **runs**, and each run materializes one or more **jobs** that the worker executes.
+
+## Why this design
+
+A single job definition can be reused across multiple workflows.
+
+For example, `sales-stats` might:
+
+- run by itself on a weekly cadence
+- appear after `etl-load-sales` in one DAG
+- appear after `load -> validate` in another DAG
+
+The schedule stays attached to the definition, while dependency ordering stays attached to the DAG version.
+
+That split makes reuse and versioning much cleaner.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    Client[Client / CLI / UI] -->|HTTP /api/v1| Server[API Server
+cmd/server]
+    Scheduler[Scheduler
+cmd/scheduler] -->|reads schedules
+creates runs| DB[(PostgreSQL)]
+    Server -->|CRUD + run APIs| DB
+    Worker[Worker
+cmd/worker] -->|lease jobs| Server
+    Worker -->|dispatch accepted / failed| Server
+    Worker -->|executes REST callbacks| Callback[External service / demo callback service]
+    Callback -->|POST job events| Server
+```
+
+### Components
+
+- **API server** exposes the REST API, worker gateway, and Swagger/OpenAPI UI.
+- **Scheduler** scans for due schedules and creates runs.
+- **Worker** leases queued jobs, dispatches them, and tracks dispatch outcomes.
+- **PostgreSQL** stores namespaces, definitions, DAGs, DAG versions, runs, jobs, and queue state.
+
+## Core model
+
+### Namespaces
+
+Namespaces are the top-level isolation boundary.
+
+Typical examples:
+
+- `finance`
+- `analytics`
+- `billing`
 
 ### Job definitions
+
 A job definition describes reusable work.
 
 Examples:
+
 - `etl-load-sales`
 - `sales-stats`
-- `email-stats`
+- `email-report`
+- `cleanup-temp-files`
 
-A definition may include an optional schedule.
+A definition includes:
 
-### Cron schedule
+- logical identity and metadata
+- execution kind
+- payload template
+- optional schedule
+- enabled / paused state
 
-```json
-{
-  "schedule": {
-    "type": "cron",
-    "cron": "0 23 * * 0",
-    "timezone": "America/New_York",
-    "on_failure": "continue"
-  }
-}
-```
+### Schedules
 
-### Interval schedule
+Schedules live on **job definitions**, not on DAGs.
+
+#### Interval example
 
 ```json
 {
   "schedule": {
     "type": "interval",
     "interval_seconds": 10,
-    "start_at": "2026-03-06T12:04:57Z",
-    "on_failure": "continue"
+    "start_at": "2026-03-06T12:04:57Z"
   }
 }
 ```
 
-A schedule that includes `cron` but omits `type` is treated as a cron schedule.
+#### Cron example
+
+```json
+{
+  "schedule": {
+    "type": "cron",
+    "cron": "0 23 * * 0",
+    "timezone": "America/New_York"
+  }
+}
+```
 
 ### DAGs and DAG versions
-A DAG is the stable workflow identity.
-A DAG version is an immutable snapshot of:
+
+A **DAG** is the stable workflow identity.
+
+A **DAG version** is an immutable snapshot of:
 
 - nodes
 - edges
-- definition bindings
+- bindings from nodes to job definitions
 
-Only **one version is enabled** for a DAG at a time.
+Only one version is active for a DAG at a time.
 
-### Runs
-A run is a concrete execution created from a DAG version.
+### Runs and jobs
 
-- **manual runs** materialize the whole DAG version
-- **scheduled runs** materialize the scheduled node on its own due time
-- downstream jobs remain in `waiting` until DAG dependencies are satisfied
+A **run** is a concrete execution of a DAG version.
 
-That lets a scheduled definition such as `sales-stats` trigger different dependency chains in different DAGs while preserving each node's own cron or interval schedule.
+- **manual runs** materialize the whole DAG
+- **scheduled runs** start from the scheduled node and allow downstream work to proceed when dependencies are satisfied
 
-## Why the split matters
+A run contains runtime **jobs**.
 
-The same definition can be reused in multiple DAGs.
+## Definitions vs DAG versions vs runs
 
-Example:
+```mermaid
+flowchart TD
+    subgraph Definitions[Reusable job definitions]
+        D1[etl-load-sales]
+        D2[sales-stats
+cron / interval optional]
+        D3[email-report]
+    end
 
-- `sales-stats` has a weekly cron schedule
-- in one DAG: `etl -> sales-stats`
-- in another DAG: `sales-stats`
-- in another DAG: `load -> validate -> sales-stats -> email`
+    subgraph DAG[DAG: weekly-sales]
+        V1[DAG version 1]
+        V2[DAG version 2]
+    end
 
-The schedule belongs to the **definition**.
-The orchestration belongs to the **DAG version**.
+    D1 --> V1
+    D2 --> V1
+    D3 --> V1
+    D1 --> V2
+    D2 --> V2
+    D3 --> V2
 
-## Versioning and revert
+    subgraph Version1Graph[Version 1 graph]
+        V1A[etl]
+        V1B[stats]
+        V1C[email]
+        V1A --> V1B --> V1C
+    end
 
-Chronosched versions the DAG structure.
+    subgraph Version2Graph[Version 2 graph]
+        V2A[etl]
+        V2B[validate]
+        V2C[stats]
+        V2D[email]
+        V2A --> V2B --> V2C --> V2D
+    end
 
-You can:
+    V1 --> Run1[Run 101]
+    V1 --> Run2[Run 102]
+    V2 --> Run3[Run 201]
+```
 
-- create new versions
-- list versions
-- inspect the latest version number
-- activate one version at a time
-- revert by creating a **new copy** from a prior version
+The same definitions can be reused while the orchestration evolves through new DAG versions.
 
-Revert is copy-based rather than reference-based so that each version remains a stable snapshot.
+## Runtime lifecycle
 
-## API surface
+```mermaid
+flowchart LR
+    Due[Definition schedule becomes due] --> Scheduler[Scheduler creates run]
+    Scheduler --> Waiting[Jobs inserted as waiting or queued]
+    Waiting --> Ready[Dependencies satisfied]
+    Ready --> Lease[Worker leases queued job]
+    Lease --> Dispatch[Worker dispatches execution]
+    Dispatch --> Started[Callback posts started]
+    Started --> Heartbeat[Optional heartbeat]
+    Heartbeat --> Done[Callback posts succeeded or failed]
+    Done --> Refresh[Run status refreshed]
+```
 
-All public endpoints are under `/api/v2`.
+Common job states include:
+
+- `waiting`
+- `queued`
+- `dispatching`
+- `dispatched`
+- `running`
+- `succeeded`
+- `failed`
+- `lost`
+- `missed`
+- `cancelled`
+- `skipped`
+
+## Project layout
+
+```text
+chronosched/
+├── cmd/
+│   ├── scheduler/
+│   ├── server/
+│   └── worker/
+├── client/
+│   └── python/
+├── internal/
+│   ├── api/
+│   ├── dag/
+│   ├── dal/
+│   │   └── sql/
+│   ├── logger/
+│   ├── repository/
+│   ├── scheduler/
+│   ├── scripts/
+│   └── worker/
+├── migrate/
+│   └── initdb/
+├── openapi/
+│   └── chronosched.yaml
+├── docker-compose.yml
+└── docker-compose.debug.yml
+```
+
+## API overview
+
+All public endpoints are rooted under **`/api/v1`**.
 
 ### Namespaces
-- `GET /api/v2/namespaces`
-- `POST /api/v2/namespaces`
-- `GET /api/v2/namespaces/{name}`
+
+- `GET /api/v1/namespaces`
+- `POST /api/v1/namespaces`
+- `GET /api/v1/namespaces/{name}`
 
 ### Job definitions
-- `GET /api/v2/namespaces/{namespace_id}/job-definitions`
-- `POST /api/v2/job-definitions`
-- `GET /api/v2/job-definitions/{definition_id}`
-- `PUT /api/v2/job-definitions/{definition_id}`
-- `POST /api/v2/job-definitions/{definition_id}/enable`
-- `POST /api/v2/job-definitions/{definition_id}/disable`
-- `POST /api/v2/job-definitions/{definition_id}/pause`
-- `POST /api/v2/job-definitions/{definition_id}/resume`
-- `GET /api/v2/job-definitions/{definition_id}/usages`
+
+- `GET /api/v1/namespaces/{namespace_id}/job-definitions`
+- `POST /api/v1/job-definitions`
+- `GET /api/v1/job-definitions/{definition_id}`
+- `PUT /api/v1/job-definitions/{definition_id}`
+- `DELETE /api/v1/job-definitions/{definition_id}`
+- `POST /api/v1/job-definitions/{definition_id}/enable`
+- `POST /api/v1/job-definitions/{definition_id}/disable`
+- `POST /api/v1/job-definitions/{definition_id}/pause`
+- `POST /api/v1/job-definitions/{definition_id}/resume`
+- `GET /api/v1/job-definitions/{definition_id}/usages`
 
 ### DAGs and versions
-- `GET /api/v2/namespaces/{namespace_id}/dags`
-- `POST /api/v2/namespaces/{namespace_id}/dags`
-- `GET /api/v2/dags/{dag_id}`
-- `GET /api/v2/dags/{dag_id}/versions`
-- `POST /api/v2/dags/{dag_id}/versions`
-- `GET /api/v2/dag-versions/{dag_version_id}`
-- `GET /api/v2/dag-versions/{dag_version_id}/graph`
-- `POST /api/v2/dag-versions/{dag_version_id}/activate`
-- `POST /api/v2/dag-versions/{dag_version_id}/revert`
 
-### Runs and runtime graph
-- `POST /api/v2/dags/{dag_id}/runs`
-- `GET /api/v2/dags/{dag_id}/runs`
-- `GET /api/v2/runs/{run_id}`
-- `GET /api/v2/runs/{run_id}/jobs`
-- `GET /api/v2/runs/{run_id}/graph`
-- `GET /api/v2/jobs/{job_id}/readiness`
+- `GET /api/v1/namespaces/{namespace_id}/dags`
+- `POST /api/v1/namespaces/{namespace_id}/dags`
+- `GET /api/v1/dags/{dag_id}`
+- `DELETE /api/v1/dags/{dag_id}`
+- `GET /api/v1/dags/{dag_id}/versions`
+- `POST /api/v1/dags/{dag_id}/versions`
+- `GET /api/v1/dag-versions/{dag_version_id}`
+- `GET /api/v1/dag-versions/{dag_version_id}/graph`
+- `POST /api/v1/dag-versions/{dag_version_id}/activate`
+- `POST /api/v1/dag-versions/{dag_version_id}/revert`
+
+### Runs and jobs
+
+- `POST /api/v1/dags/{dag_id}/runs`
+- `GET /api/v1/dags/{dag_id}/runs`
+- `GET /api/v1/runs/{run_id}`
+- `GET /api/v1/runs/{run_id}/jobs`
+- `GET /api/v1/runs/{run_id}/graph`
+- `GET /api/v1/jobs/{job_id}/readiness`
+- `POST /api/v1/jobs/{job_id}/events`
 
 ### Internal worker gateway
+
 - `POST /internal/workers/lease`
-- `POST /internal/workers/result`
+- `POST /internal/workers/dispatch-result`
 
-## Graph support
+## Running the project
 
-The API has first-class graph read models for a future UI.
-
-### Authoring graph
-`GET /api/v2/dag-versions/{dag_version_id}/graph`
-
-Returns:
-- nodes
-- edges
-- definition mapping
-- schedule metadata on nodes
-
-### Runtime graph
-`GET /api/v2/runs/{run_id}/graph`
-
-Returns:
-- runtime jobs
-- statuses
-- runtime edges
-- readiness info
-
-This is intended to support:
-- visual DAG inspection
-- workflow editors
-- runtime monitoring views
-
-## Python client
-
-The Python client mirrors the model:
-
-- `create_job_definition(...)`
-- `create_dag(...)`
-- `publish_dag_version(...)`
-- `activate_dag_version(...)`
-- `revert_dag_version(...)`
-- `get_dag_graph(...)`
-- `trigger_run(...)`
-- `get_run_graph(...)`
-- `get_job_readiness(...)`
-
-Files:
-
-- `client/python/chronosched_client.py`
-- `client/python/demo_client.py`
-
-## Running
-
-### Production
-
-Linux/macOS/WSL:
-
-```bash
-./internal/scripts/run-prod.sh
-```
-
-Windows PowerShell:
-
-```powershell
-./internal/scripts/run-prod.ps1
-```
-
-Equivalent:
-
-```bash
-docker compose up --build
-```
-
-### Debug
-
-Linux/macOS/WSL:
-
-```bash
-./internal/scripts/run-debug.sh
-```
-
-Windows PowerShell:
-
-```powershell
-./internal/scripts/run-debug.ps1
-```
-
-Equivalent:
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.debug.yml up --build
-```
-
-## Scheduling semantics
-
-Chronosched now supports two scheduling modes on a job definition:
-
-- **cron**: wall-clock aligned scheduling such as `*/10 * * * * *`
-- **interval**: relative scheduling starting at a specific timestamp and repeating every `interval_seconds`
-
-Examples:
-
-- `{"type":"cron","cron":"*/10 * * * * *"}` runs on `:00, :10, :20, :30, :40, :50`
-- `{"type":"interval","interval_seconds":10,"start_at":"2026-03-06T12:04:57Z"}` runs at `12:04:57`, `12:05:07`, `12:05:17`, and so on
-
-For DAG edges between scheduled nodes, Chronosched:
-
-- always materializes each scheduled node on **its own** cron or interval schedule
-- keeps jobs in `waiting` until required scheduled parents have a matching successful run at or before the child run's `scheduled_at`
-
-## Current limitations
-
-This is still an experimental project.
-
-Notable limitations:
-
-- the worker currently supports REST callback execution and a small callback result contract; richer executors are still future work
-- job definitions themselves are not versioned yet
-- scheduled execution uses per-node scheduler state and currently focuses on forward scheduling rather than catch-up replay
-- runtime retry policy and cancellation semantics are intentionally minimal
-
-## License
-
-MIT. See `LICENSE`.
-
-
-## REST callback demo service
-
-The Python service under `client/python` is now a FastAPI-based callback service.
-
-It demonstrates two scheduled REST jobs:
-
-- `hello_5s` runs every 5 seconds
-- `hello_10s` runs every 10 seconds
-
-The jobs are modeled as reusable work definitions with `kind = "rest"`.
-Chronosched invokes the callback URL stored in the definition payload and expects a JSON response shaped like:
-
-```json
-{
-  "success": true,
-  "message": "optional detail"
-}
-```
-
-or
-
-```json
-{
-  "success": false,
-  "error": "reason"
-}
-```
-
-For this demo the 10-second job is independently scheduled, but it remains **waiting** until the required 5-second scheduled run for the same effective boundary succeeds in the same enabled DAG version.
-If that upstream scheduled run fails, is cancelled, or is missed, the 10-second run remains blocked and its callback is not executed.
-
-The included Python demo still uses cron schedules only. Interval scheduling is available through the API and data model even though the sample callback demo does not create an interval definition by default.
-
-After two completed 10-second runs, the Python service disables the definitions, deletes the DAG, deletes the definitions, and shuts itself down.
-
-
-## Runtime topology
-
-Chronosched now runs as separate stateless services:
-
-- `server`: REST API only
-- `scheduler`: cron materialization / enqueue loop
-- `worker`: stateless executor that leases work from any API server
-- `db`: shared Postgres source of truth
-
-The active DAG version is enforced through `dags.active_version_id`. Scheduled occurrences are materialized idempotently in the database using a unique occurrence key on `(trigger_type, trigger_node_id, scheduled_at)` for both cron and interval runs.
-
-## Running the demo
+### Start everything
 
 ```bash
 docker compose up --build -d
 ```
 
-Useful logs:
+This starts:
+
+- PostgreSQL
+- API server on `http://localhost:8080`
+- scheduler
+- worker
+- Python callback demo service on `http://localhost:8090`
+
+### Check health
 
 ```bash
-docker compose logs -f server
-docker compose logs -f scheduler
-docker compose logs -f worker
-docker compose logs -f python-service
+curl http://localhost:8080/healthz
 ```
-## Expected Python service output
 
-The `python-service` logs should look roughly like:
+Expected response:
 
+```json
+{"status":"ok"}
 ```
+
+### Open the API UI
+
+Open:
+
+```text
+http://localhost:8080/
+```
+
+The OpenAPI document is served from:
+
+```text
+http://localhost:8080/openapi/chronosched.yaml
+```
+
+## Callback demo service
+
+The Python demo service under `client/python` exposes callback endpoints used by the worker.
+
+Typical log output from the Python service looks like this:
+
+```text
 python-service-1  | INFO:     Started server process [1]
 python-service-1  | INFO:     Waiting for application startup.
 python-service-1  | INFO:     Application startup complete.
 python-service-1  | INFO:     Uvicorn running on http://0.0.0.0:8090 (Press CTRL+C to quit)
 python-service-1  | INFO:     <IP:PORT> - "POST /jobs/hello-5s HTTP/1.1" 200 OK
-python-service-1  | INFO:     <IP:PORT> - "POST /jobs/hello-10s HTTP/1.1" 200 OK
-python-service-1  | INFO:     <IP:PORT> - "POST /jobs/hello-5s HTTP/1.1" 200 OK
 python-service-1  | INFO:     <IP:PORT> - "POST /jobs/hello-5s HTTP/1.1" 200 OK
 python-service-1  | INFO:     <IP:PORT> - "POST /jobs/hello-10s HTTP/1.1" 200 OK
-python-service-1  | INFO:     Shutting down
-python-service-1  | INFO:     Waiting for application shutdown.
-python-service-1  | INFO:     Application shutdown complete.
+python-service-1  | INFO:     <IP:PORT> - "POST /jobs/hello-5s HTTP/1.1" 200 OK
 ```
 
-The exact IP and port values depend on the container network.
+## Minimal end-to-end example
+
+The example below uses the REST callback worker path and a simple three-step DAG.
+
+> These commands are bash-oriented for Linux, macOS, or WSL. On native Windows `curl`, JSON quoting differs.
+
+### 1. Create a namespace
+
+```bash
+BASE=http://localhost:8080
+
+NS=$(curl -s -X POST "$BASE/api/v1/namespaces"   -H 'Content-Type: application/json'   -d '{"name":"demo"}' | jq -r '.id')
+
+echo "$NS"
+```
+
+### 2. Create job definitions
+
+```bash
+HELLO5=$(curl -s -X POST "$BASE/api/v1/job-definitions"   -H 'Content-Type: application/json'   -d '{
+    "namespace_id":"'"$NS"'",
+    "name":"hello-5s",
+    "description":"callback demo",
+    "kind":"rest",
+    "payload_template":{"url":"http://python-service:8090/jobs/hello-5s"},
+    "is_enabled":true
+  }' | jq -r '.id')
+
+HELLO10=$(curl -s -X POST "$BASE/api/v1/job-definitions"   -H 'Content-Type: application/json'   -d '{
+    "namespace_id":"'"$NS"'",
+    "name":"hello-10s",
+    "description":"callback demo",
+    "kind":"rest",
+    "payload_template":{"url":"http://python-service:8090/jobs/hello-10s"},
+    "is_enabled":true
+  }' | jq -r '.id')
+
+REPORT=$(curl -s -X POST "$BASE/api/v1/job-definitions"   -H 'Content-Type: application/json'   -d '{
+    "namespace_id":"'"$NS"'",
+    "name":"report",
+    "description":"callback demo",
+    "kind":"rest",
+    "payload_template":{"url":"http://python-service:8090/jobs/report"},
+    "is_enabled":true
+  }' | jq -r '.id')
+```
+
+### 3. Create a DAG
+
+```bash
+DAG=$(curl -s -X POST "$BASE/api/v1/namespaces/$NS/dags"   -H 'Content-Type: application/json'   -d '{"name":"demo-dag","description":"simple callback workflow"}' | jq -r '.id')
+
+echo "$DAG"
+```
+
+### 4. Publish a DAG version
+
+```bash
+VER=$(curl -s -X POST "$BASE/api/v1/dags/$DAG/versions"   -H 'Content-Type: application/json'   -d '{
+    "version_note":"initial version",
+    "nodes":[
+      {"node_key":"hello5","display_name":"Hello 5s","job_definition_id":"'"$HELLO5"'"},
+      {"node_key":"hello10","display_name":"Hello 10s","job_definition_id":"'"$HELLO10"'"},
+      {"node_key":"report","display_name":"Report","job_definition_id":"'"$REPORT"'"}
+    ],
+    "edges":[
+      {"from":"hello5","to":"hello10"},
+      {"from":"hello10","to":"report"}
+    ]
+  }' | jq -r '.id')
+
+echo "$VER"
+```
+
+### 5. Activate the DAG version
+
+```bash
+curl -i -X POST "$BASE/api/v1/dag-versions/$VER/activate"
+```
+
+### 6. Trigger a manual run
+
+```bash
+RUN=$(curl -s -X POST "$BASE/api/v1/dags/$DAG/runs"   -H 'Content-Type: application/json'   -d '{}' | jq -r '.id')
+
+echo "$RUN"
+```
+
+### 7. Inspect runtime state
+
+```bash
+curl -s "$BASE/api/v1/runs/$RUN" | jq
+curl -s "$BASE/api/v1/runs/$RUN/jobs" | jq
+curl -s "$BASE/api/v1/runs/$RUN/graph" | jq
+```
+
+## Python client
+
+The repository includes a small Python client in `client/python/chronosched_client.py`.
+
+It covers the main operations for:
+
+- namespaces
+- job definitions
+- DAGs
+- DAG versions
+- runs
+- job events
+
+## Debug mode
+
+For source-mounted debug containers:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.debug.yml up --build
+```
+
+Helper scripts are also available under `internal/scripts/`.
+
+## Current status and limitations
+
+This is still an experimental project.
+
+Current limitations include:
+
+- job definitions are not versioned independently
+- retry, cancellation, and recovery semantics are intentionally minimal
+- execution support is currently centered on the existing worker dispatch model and REST callbacks
+- there is no large built-in UI beyond the API surface and OpenAPI document
+
+## License
+
+See `LICENSE`.

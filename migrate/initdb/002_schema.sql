@@ -17,7 +17,7 @@ DROP TYPE IF EXISTS run_status CASCADE;
 DROP TYPE IF EXISTS job_status CASCADE;
 
 CREATE TYPE run_status AS ENUM ('waiting','running','succeeded','failed','missed','cancelled');
-CREATE TYPE job_status AS ENUM ('waiting','queued','running','succeeded','failed','missed','cancelled','skipped');
+CREATE TYPE job_status AS ENUM ('waiting','queued','dispatching','dispatched','running','succeeded','failed','lost','missed','cancelled','skipped');
 
 CREATE TABLE namespaces (
   namespace_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -118,8 +118,14 @@ CREATE TABLE jobs (
   payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
   lease_owner TEXT,
   lease_until TIMESTAMPTZ,
+  dispatch_attempts INT NOT NULL DEFAULT 0,
+  dispatched_at TIMESTAMPTZ,
   started_at TIMESTAMPTZ,
+  last_heartbeat_at TIMESTAMPTZ,
   finished_at TIMESTAMPTZ,
+  external_execution_id TEXT,
+  reason_code TEXT,
+  reason_detail TEXT,
   last_error TEXT
 );
 
@@ -169,6 +175,8 @@ CREATE INDEX idx_runs_dag ON dag_runs(dag_id, run_id DESC);
 CREATE UNIQUE INDEX ux_dag_runs_scheduled_occurrence ON dag_runs(trigger_type, trigger_node_id, scheduled_at) WHERE trigger_type IN ('cron','interval');
 CREATE INDEX idx_jobs_run ON jobs(run_id, job_id);
 CREATE INDEX idx_jobs_status_due ON jobs(status, due_at);
+CREATE INDEX idx_jobs_dispatched_at ON jobs(status, dispatched_at);
+CREATE INDEX idx_jobs_heartbeat_at ON jobs(status, last_heartbeat_at);
 CREATE INDEX idx_job_frontier_ready ON job_frontier(ready);
 CREATE INDEX idx_job_deps_child ON job_dependencies(child_job_id);
 CREATE INDEX idx_job_queue_available ON job_queue(available_at, priority DESC);
