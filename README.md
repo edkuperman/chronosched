@@ -2,13 +2,53 @@
 
 Chronosched is a PostgreSQL-backed DAG scheduler written in Go.
 
-It separates three concerns that are often conflated in simpler schedulers:
+Its core idea is to treat **job definitions**, **schedules**, and **DAG orchestration** as separate first-class concepts.
+
+Chronosched separates three concerns into independent concepts:
 
 - **job definitions** describe reusable work
 - **schedules** belong to job definitions
 - **DAG versions** define orchestration and dependencies
 
 At runtime, the scheduler creates **runs**, and each run materializes one or more **jobs** that the worker executes.
+
+## Quick start (local demo)
+
+Run the full stack locally:
+
+```bash
+docker compose up --build -d
+```
+
+Check the API server:
+
+```bash
+curl http://localhost:8080/healthz
+```
+
+Expected:
+
+```json
+{"status":"ok"}
+```
+
+Open the API UI:
+
+http://localhost:8080/
+
+
+## Design goals
+
+Chronosched focuses on a few core design principles:
+
+- **Separation of concerns** between job definitions, schedules, and orchestration
+- **Reusable job definitions** across multiple workflows
+- **Immutable DAG versions** so workflows can evolve safely
+- **Deterministic execution semantics** for reliable orchestration
+- **Durable state management** backed by PostgreSQL
+- **API-first integration** with external workers and services
+- **Explicit orchestration model** separating task definitions from workflow structure
+
 
 ## Why this design
 
@@ -22,9 +62,26 @@ For example, `sales-stats` might:
 
 The schedule stays attached to the definition, while dependency ordering stays attached to the DAG version.
 
-That split makes reuse and versioning much cleaner.
+That split makes reuse easier and allows workflows to evolve through new DAG versions without changing the underlying task definitions.
 
-## Architecture
+## When to use Chronosched
+
+Chronosched is designed for systems that require deterministic
+workflow orchestration with reusable job definitions.
+
+Typical scenarios include:
+
+- **data pipelines** where the same tasks appear in multiple workflows
+- **batch processing systems** whose orchestration evolves over time
+- **internal platform services** that expose scheduling via an API
+- **automation systems** that need durable execution state
+- **multi-tenant environments** where workflows must be isolated by namespace
+
+Because schedules, job definitions, and orchestration graphs are
+independent concepts, Chronosched works well in environments where
+workflows may change while the underlying tasks remain reusable.
+
+## System architecture
 
 ```mermaid
 flowchart LR
@@ -173,7 +230,7 @@ cron / interval optional]
 
 The same definitions can be reused while the orchestration evolves through new DAG versions.
 
-## Runtime lifecycle
+## Job execution lifecycle
 
 ```mermaid
 flowchart LR
@@ -469,6 +526,15 @@ Current limitations include:
 - retry, cancellation, and recovery semantics are intentionally minimal
 - execution support is currently centered on the existing worker dispatch model and REST callbacks
 - there is no large built-in UI beyond the API surface and OpenAPI document
+
+## Project status
+
+Chronosched is an experimental project exploring
+a database-backed DAG scheduler architecture.
+
+The repository is published for reference and demonstration
+purposes. External contributions are not being accepted at
+this time.
 
 ## License
 
