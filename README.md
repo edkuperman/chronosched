@@ -384,6 +384,36 @@ http://localhost:8080/openapi/chronosched.yaml
 
 The Python demo service under `client/python` exposes callback endpoints used by the worker.
 
+The demo defines three jobs:
+
+• hello-5s — a REST callback job scheduled every 5 seconds
+• hello-10s — a REST callback job scheduled every 10 seconds
+• reportJob — a REST callback job representing a downstream summary/report step
+
+Their dependencies are:
+
+• hello-10s depends on hello-5s
+• reportJob depends on hello-5s
+• reportJob depends on hello-10s
+
+This creates a small DAG containing two common patterns:
+
+• Sequential dependency: hello-5s → hello-10s
+• Fan-in dependency: hello-5s and hello-10s both feed into reportJob
+
+In other words, reportJob sits downstream of both upstream jobs and represents a node that requires multiple predecessors to complete before it can run successfully.
+
+```mermaid
+graph TD
+    H5[hello-5s<br/>REST callback<br/>5-second cadence]
+    H10[hello-10s<br/>REST callback<br/>10-second cadence]
+    R[reportJob<br/>REST callback<br/>downstream report step]
+
+    H5 -->|depends on upstream 5s success| H10
+    H5 -->|parent| R
+    H10 -->|parent| R
+```
+
 Typical log output from the Python service looks like this:
 
 ```text
@@ -394,12 +424,38 @@ python-service-1  | INFO:     Uvicorn running on http://0.0.0.0:8090 (Press CTRL
 python-service-1  | INFO:     <IP:PORT> - "POST /jobs/hello-5s HTTP/1.1" 200 OK
 python-service-1  | INFO:     <IP:PORT> - "POST /jobs/hello-5s HTTP/1.1" 200 OK
 python-service-1  | INFO:     <IP:PORT> - "POST /jobs/hello-10s HTTP/1.1" 200 OK
+python-service-1  | INFO:     <IP:PORT> - "POST /jobs/reportJob HTTP/1.1" 200 OK
 python-service-1  | INFO:     <IP:PORT> - "POST /jobs/hello-5s HTTP/1.1" 200 OK
+python-service-1  | INFO:     <IP:PORT> - "POST /jobs/hello-5s HTTP/1.1" 200 OK
+python-service-1  | INFO:     <IP:PORT> - "POST /jobs/hello-10s HTTP/1.1" 200 OK
+python-service-1  | INFO:     <IP:PORT> - "POST /jobs/reportJob HTTP/1.1" 200 OK
+python-service-1  | INFO:     <IP:PORT> - "POST /jobs/hello-5s HTTP/1.1" 200 OK
+python-service-1  | INFO:     Shutting down
+python-service-1  | INFO:     Waiting for application shutdown.
+python-service-1  | INFO:     Application shutdown complete.
+python-service-1  | INFO:     Finished server process [1]
 ```
 
 ## Minimal end-to-end example
 
-The example below uses the REST callback worker path and a simple three-step DAG.
+The example below recreates the **same fan-out / fan-in DAG used by the Python demo service**, but runs it manually through the API so the full dependency behavior can be observed immediately.
+
+The workflow contains three nodes:
+
+• **hello5** → executes the `hello-5s` job definition  
+• **hello10** → executes the `hello-10s` job definition  
+• **reportJob** → executes the `reportJob` job definition  
+
+with the following dependencies:
+
+• `hello5 → hello10`  
+• `hello5 → reportJob`  
+• `hello10 → reportJob`
+
+This creates a **fan-out / fan-in DAG** where `hello5` fans out to two downstream nodes, and `reportJob` fans in from both upstream jobs.
+
+When triggered as a **manual run**, Chronosched materializes the **entire DAG** for the run.  
+All nodes are created as jobs immediately, and execution proceeds according to dependency relationships.
 
 > These commands are bash-oriented for Linux, macOS, or WSL. On native Windows `curl`, JSON quoting differs.
 
@@ -436,10 +492,10 @@ HELLO10=$(curl -s -X POST "$BASE/api/v1/job-definitions"   -H 'Content-Type: app
 
 REPORT=$(curl -s -X POST "$BASE/api/v1/job-definitions"   -H 'Content-Type: application/json'   -d '{
     "namespace_id":"'"$NS"'",
-    "name":"report",
+    "name":"reportJob",
     "description":"callback demo",
     "kind":"rest",
-    "payload_template":{"url":"http://python-service:8090/jobs/report"},
+    "payload_template":{"url":"http://python-service:8090/jobs/reportJob"},
     "is_enabled":true
   }' | jq -r '.id')
 ```
@@ -447,7 +503,7 @@ REPORT=$(curl -s -X POST "$BASE/api/v1/job-definitions"   -H 'Content-Type: appl
 ### 3. Create a DAG
 
 ```bash
-DAG=$(curl -s -X POST "$BASE/api/v1/namespaces/$NS/dags"   -H 'Content-Type: application/json'   -d '{"name":"demo-dag","description":"simple callback workflow"}' | jq -r '.id')
+DAG=$(curl -s -X POST "$BASE/api/v1/namespaces/$NS/dags"   -H 'Content-Type: application/json'   -d '{"name":"demo-dag","description":"callback workflow"}' | jq -r '.id')
 
 echo "$DAG"
 ```
@@ -460,11 +516,12 @@ VER=$(curl -s -X POST "$BASE/api/v1/dags/$DAG/versions"   -H 'Content-Type: appl
     "nodes":[
       {"node_key":"hello5","display_name":"Hello 5s","job_definition_id":"'"$HELLO5"'"},
       {"node_key":"hello10","display_name":"Hello 10s","job_definition_id":"'"$HELLO10"'"},
-      {"node_key":"report","display_name":"Report","job_definition_id":"'"$REPORT"'"}
+      {"node_key":"reportJob","display_name":"Report Job","job_definition_id":"'"$REPORT"'"}
     ],
     "edges":[
       {"from":"hello5","to":"hello10"},
-      {"from":"hello10","to":"report"}
+      {"from":"hello5","to":"reportJob"},
+      {"from":"hello10","to":"reportJob"}
     ]
   }' | jq -r '.id')
 
@@ -488,6 +545,12 @@ echo "$RUN"
 ### 7. Inspect runtime state
 
 ```bash
+curl -s "$BASE/api/v1/runs/$RUN" | jq
+curl -s "$BASE/api/v1/runs/$RUN/jobs" | jq
+curl -s "$BASE/api/v1/runs/$RUN/graph" | jq
+```
+
+bash
 curl -s "$BASE/api/v1/runs/$RUN" | jq
 curl -s "$BASE/api/v1/runs/$RUN/jobs" | jq
 curl -s "$BASE/api/v1/runs/$RUN/graph" | jq

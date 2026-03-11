@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 import os
 import uuid
 from contextlib import asynccontextmanager
@@ -22,11 +23,14 @@ class DemoState:
     dag_version: dict[str, Any] | None = None
     hello5: dict[str, Any] | None = None
     hello10: dict[str, Any] | None = None
+    reportJob: dict[str, Any] | None = None 
     cleanup_done: bool = False
     successful_hello5: int = 0
     successful_hello10: int = 0
+    successful_report: int = 0
     started_hello5: int = 0
     started_hello10: int = 0
+    started_report: int = 0
     callback_log: list[dict[str, Any]] = field(default_factory=list)
     stop_server: Any = None
     monitor_task: asyncio.Task | None = None
@@ -45,6 +49,11 @@ class DemoState:
                 self.client.disable_job_definition(self.hello10["id"])
             except Exception:
                 pass
+        if self.reportJob:
+            try:
+                self.client.disable_job_definition(self.reportJob["id"])
+            except Exception:
+                pass            
 
 
 async def wait_for_health(client: ChronoschedClient, timeout: float = 30.0):
@@ -88,6 +97,19 @@ async def bootstrap(state: DemoState):
         payload_template=rest_payload("/jobs/hello-10s", "Hello from the 10-second job"),
         schedule={"type": "cron", "cron": "*/10 * * * * *", "timezone": "UTC", "on_failure": "continue"},
     )
+    state.reportJob = state.client.create_job_definition(
+        namespace_id=state.namespace["id"],
+        name=f"reportJob-{suffix}",
+        description="REST callback demo fan-in job; depends on latest 5-second success and on the latest 10-second success",
+        kind="rest",
+        payload_template=rest_payload("/jobs/reportJob", "Hello from report job: I see that 5-second and 10-second jobs succeeded"),
+    schedule={
+        "type": "cron",
+        "cron": "*/10 * * * * *",
+        "timezone": "UTC",
+        "on_failure": "continue",
+        }
+    )    
     state.dag = state.client.create_dag(
         state.namespace["id"],
         name=f"dispatcher-demo-dag-{suffix}",
@@ -99,8 +121,11 @@ async def bootstrap(state: DemoState):
         nodes=[
             {"node_key": "hello_5s", "display_name": "Hello every 5s", "job_definition_id": state.hello5["id"]},
             {"node_key": "hello_10s", "display_name": "Hello every 10s", "job_definition_id": state.hello10["id"]},
+            {"node_key": "reportJob", "display_name": "The report job", "job_definition_id": state.reportJob["id"]},
         ],
-        edges=[{"from": "hello_5s", "to": "hello_10s"}],
+        edges=[{"from": "hello_5s", "to": "hello_10s"}, 
+               {"from": "hello_5s", "to": "reportJob"}, 
+               {"from": "hello_10s", "to": "reportJob"}],
     )
     state.client.activate_dag_version(state.dag_version["id"])
 
@@ -113,7 +138,7 @@ async def monitor_runs(state: DemoState):
                 continue
             runs = state.client.list_runs(state.dag["id"])
             completed = [r for r in runs if r.get("status") in {"succeeded", "failed", "missed", "cancelled"}]
-            if len(completed) >= 4:
+            if len(completed) >= 8:
                 await state.cleanup()
                 if state.stop_server:
                     state.stop_server()
@@ -168,10 +193,13 @@ async def status():
         "dag_version": state.dag_version,
         "hello5": state.hello5,
         "hello10": state.hello10,
+        "reportJob": state.reportJob,
         "successful_hello5": state.successful_hello5,
         "successful_hello10": state.successful_hello10,
         "started_hello5": state.started_hello5,
         "started_hello10": state.started_hello10,
+        "successful_report": state.successful_report,
+        "started_report": state.started_report,
         "cleanup_done": state.cleanup_done,
         "runs": runs,
         "callbacks": state.callback_log[-20:],
@@ -198,3 +226,8 @@ async def hello_5s(request: Request):
 @app.post("/jobs/hello-10s")
 async def hello_10s(request: Request):
     return await accept_job(request, "hello_10s", "successful_hello10", "started_hello10")
+
+@app.post("/jobs/reportJob")
+async def report(request: Request):
+    return await accept_job(request, "reportJob", "successful_report", "started_report")
+

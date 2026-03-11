@@ -1,8 +1,9 @@
 package api
 
 import (
-	"github.com/go-chi/chi/v5"
 	"net/http"
+
+	"github.com/go-chi/chi/v5"
 )
 
 func NewHTTPHandler(h *Handler) http.Handler {
