@@ -20,6 +20,19 @@ class ChronoschedClient:
             return None
         return resp.json()
 
+    @staticmethod
+    def _as_list(value: Any) -> list[dict[str, Any]]:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return value
+        if isinstance(value, dict):
+            for key in ("items", "runs", "data", "results"):
+                nested = value.get(key)
+                if isinstance(nested, list):
+                    return nested
+        raise RuntimeError(f"Expected list-like response, got: {type(value).__name__}")
+
     def healthz(self):
         return self._request("GET", "/healthz")
 
@@ -32,7 +45,7 @@ class ChronoschedClient:
         return self._request("POST", "/api/v1/namespaces", json={"name": name})
 
     def list_namespaces(self):
-        return self._request("GET", "/api/v1/namespaces")
+        return self._as_list(self._request("GET", "/api/v1/namespaces"))
 
     def get_namespace(self, name: str):
         return self._request("GET", f"/api/v1/namespaces/{name}")
@@ -50,7 +63,7 @@ class ChronoschedClient:
         })
 
     def list_job_definitions(self, namespace_id: str):
-        return self._request("GET", f"/api/v1/namespaces/{namespace_id}/job-definitions")
+        return self._as_list(self._request("GET", f"/api/v1/namespaces/{namespace_id}/job-definitions"))
 
     def get_job_definition(self, definition_id: str):
         return self._request("GET", f"/api/v1/job-definitions/{definition_id}")
@@ -77,7 +90,7 @@ class ChronoschedClient:
         return self._request("POST", f"/api/v1/job-definitions/{definition_id}/resume")
 
     def list_dags(self, namespace_id: str):
-        return self._request("GET", f"/api/v1/namespaces/{namespace_id}/dags")
+        return self._as_list(self._request("GET", f"/api/v1/namespaces/{namespace_id}/dags"))
 
     def create_dag(self, namespace_id: str, *, name: str, description: str = ""):
         return self._request("POST", f"/api/v1/namespaces/{namespace_id}/dags", json={"name": name, "description": description})
@@ -89,7 +102,7 @@ class ChronoschedClient:
         return self._request("DELETE", f"/api/v1/dags/{dag_id}")
 
     def list_dag_versions(self, dag_id: str):
-        return self._request("GET", f"/api/v1/dags/{dag_id}/versions")
+        return self._as_list(self._request("GET", f"/api/v1/dags/{dag_id}/versions"))
 
     def publish_dag_version(self, dag_id: str, *, version_note: str = "", based_on_version_id=None, nodes=None, edges=None):
         return self._request("POST", f"/api/v1/dags/{dag_id}/versions", json={
@@ -118,16 +131,19 @@ class ChronoschedClient:
         return self._request("POST", f"/api/v1/dags/{dag_id}/runs", json=payload)
 
     def list_runs(self, dag_id: str):
-        return self._request("GET", f"/api/v1/dags/{dag_id}/runs")
+        return self._as_list(self._request("GET", f"/api/v1/dags/{dag_id}/runs"))
 
     def get_run(self, run_id: int):
         return self._request("GET", f"/api/v1/runs/{run_id}")
 
     def list_run_jobs(self, run_id: int):
-        return self._request("GET", f"/api/v1/runs/{run_id}/jobs")
+        return self._as_list(self._request("GET", f"/api/v1/runs/{run_id}/jobs"))
 
     def get_run_graph(self, run_id: int):
         return self._request("GET", f"/api/v1/runs/{run_id}/graph")
 
     def get_job_readiness(self, job_id: int):
         return self._request("GET", f"/api/v1/jobs/{job_id}/readiness")
+
+    def get_run_summary(self, run_id: int):
+        return self._request("GET", f"/api/v1/runs/{run_id}/summary")

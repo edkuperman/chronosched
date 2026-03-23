@@ -1,18 +1,25 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/edkuperman/chronosched/internal/ai"
 	"github.com/edkuperman/chronosched/internal/repository"
 	"github.com/go-chi/chi/v5"
 )
 
 type Handler struct {
-	Repos *repository.Repos
+	Repos      *repository.Repos
+	Summarizer RunSummarizer
+}
+
+type RunSummarizer interface {
+	SummarizeRun(ctx context.Context, graph *repository.RunGraph) (*ai.RunSummary, error)
 }
 
 func NewHandler(repos *repository.Repos) *Handler { return &Handler{Repos: repos} }
@@ -367,6 +374,29 @@ func (h *Handler) getRunGraph(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, graph)
+}
+
+func (h *Handler) getRunSummary(w http.ResponseWriter, r *http.Request) {
+	runID, err := parseInt64Param(r, "run_id")
+	if err != nil {
+		http.Error(w, "invalid run_id", http.StatusBadRequest)
+		return
+	}
+	graph, err := h.Repos.Runs.GetGraph(r.Context(), runID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if h.Summarizer == nil {
+		http.Error(w, "run summarizer is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	summary, err := h.Summarizer.SummarizeRun(r.Context(), graph)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, summary)
 }
 
 // ===== Jobs =====

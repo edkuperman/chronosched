@@ -482,6 +482,18 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/RunGraph'
+  /api/v1/runs/{run_id}/summary:
+    get:
+      summary: Get AI-assisted run failure summary
+      parameters:
+      - $ref: '#/components/parameters/RunId'
+      responses:
+        '200':
+          description: Run summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunSummary'
   /api/v1/jobs/{job_id}/readiness:
     get:
       tags:

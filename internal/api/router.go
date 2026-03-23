@@ -45,6 +45,7 @@ func NewHTTPHandler(h *Handler) http.Handler {
 		r.Get("/runs/{run_id}", h.getRun)
 		r.Get("/runs/{run_id}/jobs", h.listRunJobs)
 		r.Get("/runs/{run_id}/graph", h.getRunGraph)
+		r.Get("/runs/{run_id}/summary", h.getRunSummary)
 
 		r.Get("/namespaces/{namespace_id}/jobs/problems", h.listNamespaceProblemJobs)
 		r.Post("/namespaces/{namespace_id}/jobs/{job_id}/restart", h.restartNamespaceJob)

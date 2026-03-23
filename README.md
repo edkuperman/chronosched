@@ -695,3 +695,47 @@ Typical events include:
 Events include identifiers such as namespace, DAG, run, and job IDs,
 and can be consumed for logging, analytics, or warehousing.
 
+
+
+## Run failure summary analysis
+
+Chronosched can generate an AI-assisted summary for a run with:
+
+```bash
+GET /api/v1/runs/{run_id}/summary
+```
+
+The endpoint builds a compact run context from the run graph, failed node status, upstream successes, downstream impacted nodes, and recorded reason fields. When `OPENAI_API_KEY` is configured, the server sends that context to OpenAI and returns a structured response containing:
+
+- `failed_node`
+- `type`
+- `cause`
+- `impact`
+- `next_steps`
+- `confidence`
+- `retry`
+
+If OpenAI is not configured or the API call fails, the endpoint still returns a deterministic heuristic summary so local debugging continues to work.
+
+### Secure local key setup
+
+Create a local `.env` file from `.env.example` and keep your real key there. `.env` is ignored by Git, so it will not be committed.
+
+```bash
+cp .env.example .env
+# then edit .env and set OPENAI_API_KEY
+```
+
+Docker Compose will automatically read `.env` from the project root. You can also supply a different file explicitly:
+
+```bash
+docker compose --env-file .env up --build
+```
+
+You can still override on the command line for a one-off local run:
+
+```bash
+OPENAI_API_KEY=your_key_here docker compose up --build
+```
+
+Avoid hard-coding API keys in source, Dockerfiles, or checked-in compose files.

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/edkuperman/chronosched/internal/ai"
 	"github.com/edkuperman/chronosched/internal/repository"
 	"github.com/go-chi/chi/v5"
 )
@@ -34,6 +35,15 @@ func (f *fakeNamespaces) Create(_ context.Context, name string) (*repository.Nam
 }
 func (f *fakeNamespaces) GetByName(context.Context, string) (*repository.Namespace, error) {
 	return f.getBy, f.getErr
+}
+
+type fakeSummarizer struct {
+	summary *ai.RunSummary
+	err     error
+}
+
+func (f *fakeSummarizer) SummarizeRun(context.Context, *repository.RunGraph) (*ai.RunSummary, error) {
+	return f.summary, f.err
 }
 
 type fakeDefinitions struct {
@@ -143,5 +153,43 @@ func TestCreateDefinition_DefaultKindAndEnabled(t *testing.T) {
 	}
 	if !defRepo.created.IsEnabled {
 		t.Fatal("expected IsEnabled to default to true")
+	}
+}
+
+type fakeRuns struct{ graph *repository.RunGraph }
+
+func (f *fakeRuns) CreateManualRun(context.Context, string, *string, time.Time) (*repository.DAGRun, error) {
+	return nil, nil
+}
+func (f *fakeRuns) CreateScheduledRun(context.Context, string, string, string, string, time.Time) (*repository.DAGRun, error) {
+	return nil, nil
+}
+func (f *fakeRuns) ListByDAG(context.Context, string) ([]repository.DAGRun, error) { return nil, nil }
+func (f *fakeRuns) Get(context.Context, int64) (*repository.DAGRun, error)         { return nil, nil }
+func (f *fakeRuns) GetSchedulingMeta(context.Context, int64) (*repository.RunSchedulingMeta, error) {
+	return nil, nil
+}
+func (f *fakeRuns) ListJobs(context.Context, int64) ([]repository.RunJob, error) { return nil, nil }
+func (f *fakeRuns) GetGraph(context.Context, int64) (*repository.RunGraph, error) {
+	return f.graph, nil
+}
+func (f *fakeRuns) RefreshStatus(context.Context, int64) error { return nil }
+
+func TestGetRunSummary(t *testing.T) {
+	h := NewHandler(&repository.Repos{Runs: &fakeRuns{graph: &repository.RunGraph{Run: repository.DAGRun{ID: 42, Status: repository.RunStatusFailed}}}})
+	h.Summarizer = &fakeSummarizer{summary: &ai.RunSummary{RunID: 42, Cause: "boom", Type: "timeout", Retry: "safe"}}
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/runs/42/summary", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("run_id", "42")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	h.getRunSummary(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"cause":"boom"`)) {
+		t.Fatalf("unexpected summary body: %s", rr.Body.String())
 	}
 }

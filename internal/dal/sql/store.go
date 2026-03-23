@@ -1178,6 +1178,17 @@ func (s *Store) GetGraph(ctx context.Context, runID int64) (*repository.RunGraph
 	if err != nil {
 		return nil, err
 	}
+	if run.Trigger.Type == "manual" {
+		return s.getRunGraph(ctx, run, runID)
+	}
+	graph, err := s.getWorkflowGraph(ctx, run)
+	if err == nil {
+		return graph, nil
+	}
+	return s.getRunGraph(ctx, run, runID)
+}
+
+func (s *Store) getRunGraph(ctx context.Context, run *repository.DAGRun, runID int64) (*repository.RunGraph, error) {
 	jobs, err := s.ListJobs(ctx, runID)
 	if err != nil {
 		return nil, err
@@ -1192,7 +1203,7 @@ ORDER BY d.parent_job_id, d.child_job_id`, runID)
 		return nil, err
 	}
 	defer rows.Close()
-	var edges []repository.RunGraphEdge
+	edges := make([]repository.RunGraphEdge, 0)
 	for rows.Next() {
 		var e repository.RunGraphEdge
 		if err := rows.Scan(&e.FromJobID, &e.ToJobID); err != nil {
@@ -1201,6 +1212,79 @@ ORDER BY d.parent_job_id, d.child_job_id`, runID)
 		edges = append(edges, e)
 	}
 	return &repository.RunGraph{Run: *run, Nodes: jobs, Edges: edges}, rows.Err()
+}
+
+func (s *Store) getWorkflowGraph(ctx context.Context, run *repository.DAGRun) (*repository.RunGraph, error) {
+	jobsRows, err := s.dal.DB.Query(ctx, `
+SELECT j.job_id, j.run_id, j.node_key, j.display_name, j.job_definition_id::text, jd.name, j.status,
+       j.due_at, j.dispatched_at, j.started_at, j.last_heartbeat_at, j.finished_at, j.external_execution_id, j.reason_code, j.last_error, COALESCE(f.ready, FALSE)
+FROM jobs j
+JOIN job_definitions jd ON jd.definition_id=j.job_definition_id
+LEFT JOIN job_frontier f ON f.job_id=j.job_id
+WHERE j.run_id IN (
+    SELECT run_id
+    FROM dag_runs
+    WHERE dag_version_id=$1 AND scheduled_at=$2
+)
+ORDER BY j.run_id, j.job_id`, run.DAGVersionID, run.ScheduledAt)
+	if err != nil {
+		return nil, err
+	}
+	defer jobsRows.Close()
+	jobs := make([]repository.RunJob, 0)
+	for jobsRows.Next() {
+		var j repository.RunJob
+		var dispatched, started, heartbeat, finished stdsql.NullTime
+		var externalID, reasonCode, lastErr stdsql.NullString
+		var ready bool
+		if err := jobsRows.Scan(&j.JobID, &j.RunID, &j.NodeKey, &j.DisplayName, &j.JobDefinitionID, &j.JobDefinitionName, &j.Status, &j.DueAt, &dispatched, &started, &heartbeat, &finished, &externalID, &reasonCode, &lastErr, &ready); err != nil {
+			return nil, err
+		}
+		j.DispatchedAt = timePtr(dispatched)
+		j.StartedAt = timePtr(started)
+		j.LastHeartbeatAt = timePtr(heartbeat)
+		j.FinishedAt = timePtr(finished)
+		j.ExternalExecutionID = nullStringPtr(externalID)
+		j.ReasonCode = nullStringPtr(reasonCode)
+		j.LastError = nullStringPtr(lastErr)
+		j.IsReady = &ready
+		jobs = append(jobs, j)
+	}
+	if err := jobsRows.Err(); err != nil {
+		return nil, err
+	}
+	edgeRows, err := s.dal.DB.Query(ctx, `
+SELECT DISTINCT fromj.job_id, toj.job_id
+FROM dag_version_edges e
+JOIN dag_version_nodes fromn ON fromn.node_id=e.from_node_id
+JOIN dag_version_nodes ton ON ton.node_id=e.to_node_id
+JOIN jobs fromj ON fromj.node_key=fromn.node_key
+JOIN jobs toj ON toj.node_key=ton.node_key
+JOIN dag_runs fromr ON fromr.run_id=fromj.run_id
+JOIN dag_runs tor ON tor.run_id=toj.run_id
+WHERE e.dag_version_id=$1
+  AND fromr.dag_version_id=$1 AND fromr.scheduled_at=$2
+  AND tor.dag_version_id=$1 AND tor.scheduled_at=$2
+ORDER BY fromj.job_id, toj.job_id`, run.DAGVersionID, run.ScheduledAt)
+	if err != nil {
+		return nil, err
+	}
+	defer edgeRows.Close()
+	edges := make([]repository.RunGraphEdge, 0)
+	for edgeRows.Next() {
+		var e repository.RunGraphEdge
+		if err := edgeRows.Scan(&e.FromJobID, &e.ToJobID); err != nil {
+			return nil, err
+		}
+		edges = append(edges, e)
+	}
+	if err := edgeRows.Err(); err != nil {
+		return nil, err
+	}
+	if len(jobs) == 0 {
+		return s.getRunGraph(ctx, run, run.ID)
+	}
+	return &repository.RunGraph{Run: *run, Nodes: jobs, Edges: edges}, nil
 }
 
 func (s *Store) RefreshStatus(ctx context.Context, runID int64) error {

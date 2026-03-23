@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/edkuperman/chronosched/internal/ai"
 	"github.com/edkuperman/chronosched/internal/api"
 	"github.com/edkuperman/chronosched/internal/dal/sql"
 	"github.com/edkuperman/chronosched/internal/events"
@@ -45,9 +46,12 @@ func main() {
 
 	addr := ":" + port
 
+	handler := api.NewHandler(repos)
+	handler.Summarizer = ai.NewSummarizerFromEnv()
+
 	srv := &http.Server{
 		Addr:    addr,
-		Handler: api.NewHTTPHandler(api.NewHandler(repos)),
+		Handler: api.NewHTTPHandler(handler),
 	}
 
 	logger.Info("chronosched listening", "addr", addr)
