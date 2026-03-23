@@ -256,6 +256,7 @@ Common job states include:
 - `failed`
 - `lost`
 - `missed`
+- `blocked`
 - `cancelled`
 - `skipped`
 
@@ -602,3 +603,95 @@ this time.
 ## License
 
 See `LICENSE`.
+
+
+---
+
+## Restart and recovery
+
+Jobs can be restarted within a run to recover from failures.
+
+Endpoint:
+
+POST /api/v1/namespaces/{namespace_id}/jobs/{job_id}/restart
+
+Request:
+
+{
+  "cascade": true,
+  "mode": "run_now"
+}
+
+Parameters:
+
+- cascade (default true)
+- mode: run_now | next_schedule
+
+Behavior:
+
+- Resets the selected job
+- Optionally cascades to downstream dependent jobs
+- Recomputes dependency readiness
+- Scheduler resumes execution automatically
+
+### Resume modes
+
+- run_now — job becomes immediately eligible
+- next_schedule — job resumes at next scheduled time
+
+### Scheduling gate
+
+jobs.eligible_at TIMESTAMPTZ
+
+Scheduler condition:
+
+status = 'waiting'
+AND ready = true
+AND (eligible_at IS NULL OR eligible_at <= now())
+
+---
+
+## Problem jobs API
+
+GET /api/v1/namespaces/{namespace_id}/jobs/problems
+
+Optional filters:
+- dag_id
+- status
+
+Default problem states:
+- failed
+- lost
+- missed
+- blocked
+
+
+
+
+
+### Default problem states
+
+| Status   | Meaning | Typical cause | Retry guidance |
+|----------|---------|---------------|----------------|
+| `failed` | Job executed and returned an explicit failure (e.g., non-200 response or application error). | Application error, bad input, downstream service returned error | Safe to retry after fixing the root cause; idempotent handlers recommended. |
+| `lost`   | Job was dispatched but no completion was recorded before lease expiration (worker crash, timeout, or network issue). Outcome is unknown. | Worker crash, pod eviction, network partition, long-running task exceeding lease | Retry with caution; ensure idempotency or use de-duplication since the job may still be running. |
+| `missed` | Job never executed within its scheduling window due to delay, backlog, or capacity constraints. | Scheduler lag, queue backlog, insufficient workers, tight SLA window | Safe to retry or reschedule; no side effects occurred. |
+| `blocked`| Job cannot run because one or more upstream dependencies are in a terminal non-success state. | Upstream job failed/lost/missed | Resolve upstream failures, then restart (optionally cascade) to unblock downstream jobs. |
+
+---
+
+## Event model
+
+Chronosched produces lifecycle events for runs and jobs.
+
+Typical events include:
+
+- run.created
+- run.status_changed
+- job.status_changed
+- job.heartbeat
+- job.restarted
+
+Events include identifiers such as namespace, DAG, run, and job IDs,
+and can be consumed for logging, analytics, or warehousing.
+

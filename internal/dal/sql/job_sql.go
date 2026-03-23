@@ -49,6 +49,15 @@ func (j *JobSQL) MarkLost(ctx context.Context, id int64, reasonCode, reasonDetai
 func (j *JobSQL) MarkMissed(ctx context.Context, id int64, reasonCode, reasonDetail string) error {
 	return j.store.MarkMissed(ctx, id, reasonCode, reasonDetail)
 }
+func (j *JobSQL) MarkBlocked(ctx context.Context, id int64, reasonCode, reasonDetail string) error {
+	return j.store.MarkBlocked(ctx, id, reasonCode, reasonDetail)
+}
+func (j *JobSQL) ListProblemJobs(ctx context.Context, namespaceID string, dagID *string, statuses []repository.JobStatus, limit int) ([]repository.ProblemJob, error) {
+	return j.store.ListProblemJobs(ctx, namespaceID, dagID, statuses, limit)
+}
+func (j *JobSQL) RestartJob(ctx context.Context, namespaceID string, jobID int64, opts repository.RestartJobOptions) (*repository.RestartJobResult, error) {
+	return j.store.RestartJob(ctx, namespaceID, jobID, opts)
+}
 func (j *JobSQL) GetReadiness(ctx context.Context, id int64) (*repository.JobReadiness, error) {
 	return j.store.GetReadiness(ctx, id)
 }

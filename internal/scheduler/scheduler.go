@@ -254,7 +254,7 @@ func (s *Scheduler) enqueueReadyJobs(ctx context.Context) error {
 		case parentCheckBlocked:
 			continue
 		case parentCheckImpossible:
-			if err := s.repos.Jobs.MarkMissed(ctx, j.ID, "failed_dependency", reason); err == nil {
+			if err := s.repos.Jobs.MarkBlocked(ctx, j.ID, "failed_dependency", reason); err == nil {
 				if runID, err := s.repos.Jobs.GetRunID(ctx, j.ID); err == nil {
 					_ = s.repos.Runs.RefreshStatus(ctx, runID)
 				}
@@ -279,8 +279,8 @@ func (s *Scheduler) sweepBlockedJobs(ctx context.Context) error {
 		return err
 	}
 	for _, j := range jobs {
-		if err := s.repos.Jobs.MarkMissed(ctx, j.ID, "failed_dependency", "an upstream dependency completed without success"); err != nil {
-			logger.Error(err, "mark missed failed", "jobID", j.ID)
+		if err := s.repos.Jobs.MarkBlocked(ctx, j.ID, "failed_dependency", "an upstream dependency completed without success"); err != nil {
+			logger.Error(err, "mark blocked failed", "jobID", j.ID)
 			continue
 		}
 		if runID, err := s.repos.Jobs.GetRunID(ctx, j.ID); err == nil {

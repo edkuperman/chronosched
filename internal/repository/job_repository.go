@@ -18,9 +18,41 @@ const (
 	JobStatusFailed      JobStatus = "failed"
 	JobStatusLost        JobStatus = "lost"
 	JobStatusMissed      JobStatus = "missed"
+	JobStatusBlocked     JobStatus = "blocked"
 	JobStatusCancelled   JobStatus = "cancelled"
 	JobStatusSkipped     JobStatus = "skipped"
 )
+
+type ProblemJob struct {
+	JobID            int64      `json:"job_id"`
+	RunID            int64      `json:"run_id"`
+	NamespaceID      string     `json:"namespace_id"`
+	DAGID            string     `json:"dag_id"`
+	DAGName          string     `json:"dag_name,omitempty"`
+	NodeKey          string     `json:"node_key"`
+	DisplayName      string     `json:"display_name"`
+	Status           JobStatus  `json:"status"`
+	DispatchAttempts int        `json:"dispatch_attempts"`
+	ReasonCode       *string    `json:"reason_code,omitempty"`
+	ReasonDetail     *string    `json:"reason_detail,omitempty"`
+	LastError        *string    `json:"last_error,omitempty"`
+	StartedAt        *time.Time `json:"started_at,omitempty"`
+	FinishedAt       *time.Time `json:"finished_at,omitempty"`
+	IsReady          bool       `json:"is_ready"`
+	IsRestartable    bool       `json:"is_restartable"`
+}
+
+type RestartJobOptions struct {
+	Cascade bool `json:"cascade"`
+}
+
+type RestartJobResult struct {
+	JobID       int64     `json:"job_id"`
+	RunID       int64     `json:"run_id"`
+	Cascade     bool      `json:"cascade"`
+	ResetJobIDs []int64   `json:"reset_job_ids"`
+	RestartedAt time.Time `json:"restarted_at"`
+}
 
 type Job struct {
 	ID                  int64      `json:"id"`
@@ -76,6 +108,9 @@ type JobRepository interface {
 	RecordCompletion(ctx context.Context, id int64, success bool, reasonCode, reasonDetail string) error
 	MarkLost(ctx context.Context, id int64, reasonCode, reasonDetail string) error
 	MarkMissed(ctx context.Context, id int64, reasonCode, reasonDetail string) error
+	MarkBlocked(ctx context.Context, id int64, reasonCode, reasonDetail string) error
+	ListProblemJobs(ctx context.Context, namespaceID string, dagID *string, statuses []JobStatus, limit int) ([]ProblemJob, error)
+	RestartJob(ctx context.Context, namespaceID string, jobID int64, opts RestartJobOptions) (*RestartJobResult, error)
 	GetReadiness(ctx context.Context, id int64) (*JobReadiness, error)
 	GetRunID(ctx context.Context, id int64) (int64, error)
 	GetExecution(ctx context.Context, id int64) (*JobExecution, error)

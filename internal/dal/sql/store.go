@@ -10,15 +10,18 @@ import (
 	"time"
 
 	"github.com/edkuperman/chronosched/internal/dag"
+	"github.com/edkuperman/chronosched/internal/events"
+	"github.com/edkuperman/chronosched/internal/logger"
 	"github.com/edkuperman/chronosched/internal/repository"
 	"github.com/jackc/pgx/v5"
 )
 
 type Store struct {
-	dal *SQLDAL
+	dal       *SQLDAL
+	publisher events.EventPublisher
 }
 
-func NewStore(dal *SQLDAL) *Store { return &Store{dal: dal} }
+func NewStore(dal *SQLDAL) *Store { return &Store{dal: dal, publisher: events.DefaultPublisher()} }
 
 func nullStringPtr(ns stdsql.NullString) *string {
 	if !ns.Valid {
@@ -41,6 +44,69 @@ func normalizePayload(raw json.RawMessage) json.RawMessage {
 		return json.RawMessage(`{}`)
 	}
 	return raw
+}
+
+type rowQueryer interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+type jobEventMeta struct {
+	NamespaceID string
+	DAGID       string
+	RunID       int64
+	JobID       int64
+	NodeKey     string
+	Status      repository.JobStatus
+}
+
+type runEventMeta struct {
+	NamespaceID string
+	DAGID       string
+	RunID       int64
+	Status      repository.RunStatus
+	TriggerType string
+}
+
+func (s *Store) publishEvent(ctx context.Context, evt events.Event) {
+	if s.publisher == nil {
+		return
+	}
+	if evt.EventID == "" {
+		evt.EventID = events.NewEventID()
+	}
+	if evt.OccurredAt.IsZero() {
+		evt.OccurredAt = time.Now().UTC()
+	}
+	if err := s.publisher.Publish(ctx, evt); err != nil {
+		logger.Error(err, "failed to publish event", "event_type", evt.EventType, "job_id", evt.JobID, "run_id", evt.RunID)
+	}
+}
+
+func (s *Store) loadJobEventMeta(ctx context.Context, q rowQueryer, jobID int64) (*jobEventMeta, error) {
+	var meta jobEventMeta
+	err := q.QueryRow(ctx, `
+SELECT d.namespace_id::text, dr.dag_id::text, j.run_id, j.job_id, j.node_key, j.status
+FROM jobs j
+JOIN dag_runs dr ON dr.run_id=j.run_id
+JOIN dags d ON d.dag_id=dr.dag_id
+WHERE j.job_id=$1`, jobID).Scan(&meta.NamespaceID, &meta.DAGID, &meta.RunID, &meta.JobID, &meta.NodeKey, &meta.Status)
+	if err != nil {
+		return nil, err
+	}
+	return &meta, nil
+}
+
+func (s *Store) loadRunEventMeta(ctx context.Context, q rowQueryer, runID int64) (*runEventMeta, error) {
+	var meta runEventMeta
+	err := q.QueryRow(ctx, `
+SELECT d.namespace_id::text, dr.dag_id::text, dr.run_id, dr.status, dr.trigger_type
+FROM dag_runs dr
+JOIN dags d ON d.dag_id=dr.dag_id
+WHERE dr.run_id=$1`, runID).Scan(&meta.NamespaceID, &meta.DAGID, &meta.RunID, &meta.Status, &meta.TriggerType)
+	if err != nil {
+		return nil, err
+	}
+	return &meta, nil
 }
 
 // ===== Namespaces =====
@@ -913,6 +979,9 @@ func (s *Store) CreateManualRun(ctx context.Context, dagID string, dagVersionID 
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
+	if meta, err := s.loadRunEventMeta(ctx, s.dal.DB, run.ID); err == nil {
+		s.publishEvent(ctx, events.Event{EventType: "run.created", NamespaceID: meta.NamespaceID, DAGID: meta.DAGID, RunID: meta.RunID, TriggerType: meta.TriggerType})
+	}
 	return run, nil
 }
 
@@ -965,6 +1034,11 @@ RETURNING run_id, created_at`, dagID, dagVersionID, triggerType, triggerNodeID, 
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
+	}
+	if run.ID != 0 {
+		if meta, err := s.loadRunEventMeta(ctx, s.dal.DB, run.ID); err == nil {
+			s.publishEvent(ctx, events.Event{EventType: "run.created", NamespaceID: meta.NamespaceID, DAGID: meta.DAGID, RunID: meta.RunID, TriggerType: meta.TriggerType})
+		}
 	}
 	return &run, nil
 }
@@ -1135,7 +1209,13 @@ func (s *Store) RefreshStatus(ctx context.Context, runID int64) error {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	var waiting, queued, running, succeeded, failed, missed int
+
+	prevMeta, err := s.loadRunEventMeta(ctx, tx, runID)
+	if err != nil {
+		return err
+	}
+
+	var waiting, queued, running, succeeded, failed, missed, blocked int
 	err = tx.QueryRow(ctx, `
 SELECT
   count(*) FILTER (WHERE status='waiting'),
@@ -1143,13 +1223,14 @@ SELECT
   count(*) FILTER (WHERE status IN ('dispatching','dispatched','running')),
   count(*) FILTER (WHERE status='succeeded'),
   count(*) FILTER (WHERE status IN ('failed','lost')),
-  count(*) FILTER (WHERE status='missed')
-FROM jobs WHERE run_id=$1`, runID).Scan(&waiting, &queued, &running, &succeeded, &failed, &missed)
+  count(*) FILTER (WHERE status='missed'),
+  count(*) FILTER (WHERE status='blocked')
+FROM jobs WHERE run_id=$1`, runID).Scan(&waiting, &queued, &running, &succeeded, &failed, &missed, &blocked)
 	if err != nil {
 		return err
 	}
 	status := repository.RunStatusWaiting
-	if failed > 0 {
+	if failed > 0 || blocked > 0 {
 		status = repository.RunStatusFailed
 	} else if missed > 0 {
 		status = repository.RunStatusMissed
@@ -1167,7 +1248,21 @@ WHERE run_id=$1`, runID, status)
 	if err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	if prevMeta.Status != status {
+		s.publishEvent(ctx, events.Event{
+			EventType:   "run.status_changed",
+			NamespaceID: prevMeta.NamespaceID,
+			DAGID:       prevMeta.DAGID,
+			RunID:       prevMeta.RunID,
+			OldStatus:   string(prevMeta.Status),
+			NewStatus:   string(status),
+			TriggerType: prevMeta.TriggerType,
+		})
+	}
+	return nil
 }
 
 // ===== Jobs =====
@@ -1208,48 +1303,188 @@ LIMIT $2`, before, limit)
 }
 
 func (s *Store) MarkQueued(ctx context.Context, id int64) error {
-	_, err := s.dal.DB.Exec(ctx, `UPDATE jobs SET status='queued' WHERE job_id=$1 AND status='waiting'`, id)
-	return err
+	meta, err := s.loadJobEventMeta(ctx, s.dal.DB, id)
+	if err != nil {
+		return err
+	}
+	tag, err := s.dal.DB.Exec(ctx, `UPDATE jobs SET status='queued' WHERE job_id=$1 AND status='waiting'`, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() > 0 {
+		s.publishEvent(ctx, events.Event{
+			EventType:   "job.status_changed",
+			NamespaceID: meta.NamespaceID,
+			DAGID:       meta.DAGID,
+			RunID:       meta.RunID,
+			JobID:       meta.JobID,
+			NodeKey:     meta.NodeKey,
+			OldStatus:   string(meta.Status),
+			NewStatus:   string(repository.JobStatusQueued),
+		})
+	}
+	return nil
 }
-
 func (s *Store) MarkDispatching(ctx context.Context, id int64, workerID string, leaseFor time.Duration) error {
-	_, err := s.dal.DB.Exec(ctx, `UPDATE jobs SET status='dispatching', lease_owner=$2, lease_until=now()+$3::interval WHERE job_id=$1 AND status='queued'`, id, workerID, leaseFor.String())
-	return err
+	meta, err := s.loadJobEventMeta(ctx, s.dal.DB, id)
+	if err != nil {
+		return err
+	}
+	tag, err := s.dal.DB.Exec(ctx, `UPDATE jobs SET status='dispatching', lease_owner=$2, lease_until=now()+$3::interval WHERE job_id=$1 AND status='queued'`, id, workerID, leaseFor.String())
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() > 0 {
+		s.publishEvent(ctx, events.Event{
+			EventType:   "job.status_changed",
+			NamespaceID: meta.NamespaceID,
+			DAGID:       meta.DAGID,
+			RunID:       meta.RunID,
+			JobID:       meta.JobID,
+			NodeKey:     meta.NodeKey,
+			OldStatus:   string(meta.Status),
+			NewStatus:   string(repository.JobStatusDispatching),
+		})
+	}
+	return nil
 }
-
 func (s *Store) RecordDispatchAccepted(ctx context.Context, id int64, externalExecutionID string) error {
-	_, err := s.dal.DB.Exec(ctx, `UPDATE jobs SET status='dispatched', dispatched_at=now(), external_execution_id=NULLIF($2,''), reason_code=NULL, reason_detail=NULL, last_error=NULL, lease_owner=NULL, lease_until=NULL, dispatch_attempts=dispatch_attempts+1 WHERE job_id=$1`, id, externalExecutionID)
-	return err
+	meta, err := s.loadJobEventMeta(ctx, s.dal.DB, id)
+	if err != nil {
+		return err
+	}
+	tag, err := s.dal.DB.Exec(ctx, `UPDATE jobs SET status='dispatched', dispatched_at=now(), external_execution_id=NULLIF($2,''), reason_code=NULL, reason_detail=NULL, last_error=NULL, lease_owner=NULL, lease_until=NULL, dispatch_attempts=dispatch_attempts+1 WHERE job_id=$1`, id, externalExecutionID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() > 0 {
+		s.publishEvent(ctx, events.Event{
+			EventType:   "job.status_changed",
+			NamespaceID: meta.NamespaceID,
+			DAGID:       meta.DAGID,
+			RunID:       meta.RunID,
+			JobID:       meta.JobID,
+			NodeKey:     meta.NodeKey,
+			OldStatus:   string(meta.Status),
+			NewStatus:   string(repository.JobStatusDispatched),
+		})
+	}
+	return nil
 }
-
 func (s *Store) RecordDispatchRetry(ctx context.Context, id int64, reasonCode, reasonDetail string) error {
-	_, err := s.dal.DB.Exec(ctx, `UPDATE jobs SET status='queued', reason_code=$2, reason_detail=$3, last_error=$3, lease_owner=NULL, lease_until=NULL, dispatch_attempts=dispatch_attempts+1 WHERE job_id=$1`, id, reasonCode, reasonDetail)
-	return err
+	meta, err := s.loadJobEventMeta(ctx, s.dal.DB, id)
+	if err != nil {
+		return err
+	}
+	tag, err := s.dal.DB.Exec(ctx, `UPDATE jobs SET status='queued', reason_code=$2, reason_detail=$3, last_error=$3, lease_owner=NULL, lease_until=NULL, dispatch_attempts=dispatch_attempts+1 WHERE job_id=$1`, id, reasonCode, reasonDetail)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() > 0 {
+		s.publishEvent(ctx, events.Event{
+			EventType:    "job.status_changed",
+			NamespaceID:  meta.NamespaceID,
+			DAGID:        meta.DAGID,
+			RunID:        meta.RunID,
+			JobID:        meta.JobID,
+			NodeKey:      meta.NodeKey,
+			OldStatus:    string(meta.Status),
+			NewStatus:    string(repository.JobStatusQueued),
+			ReasonCode:   reasonCode,
+			ReasonDetail: reasonDetail,
+		})
+	}
+	return nil
 }
-
 func (s *Store) RecordDispatchFailed(ctx context.Context, id int64, reasonCode, reasonDetail string) error {
-	_, err := s.dal.DB.Exec(ctx, `UPDATE jobs SET status='failed', finished_at=now(), reason_code=$2, reason_detail=$3, last_error=$3, lease_owner=NULL, lease_until=NULL, dispatch_attempts=dispatch_attempts+1 WHERE job_id=$1`, id, reasonCode, reasonDetail)
-	return err
+	meta, err := s.loadJobEventMeta(ctx, s.dal.DB, id)
+	if err != nil {
+		return err
+	}
+	tag, err := s.dal.DB.Exec(ctx, `UPDATE jobs SET status='failed', finished_at=now(), reason_code=$2, reason_detail=$3, last_error=$3, lease_owner=NULL, lease_until=NULL, dispatch_attempts=dispatch_attempts+1 WHERE job_id=$1`, id, reasonCode, reasonDetail)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() > 0 {
+		s.publishEvent(ctx, events.Event{
+			EventType:    "job.status_changed",
+			NamespaceID:  meta.NamespaceID,
+			DAGID:        meta.DAGID,
+			RunID:        meta.RunID,
+			JobID:        meta.JobID,
+			NodeKey:      meta.NodeKey,
+			OldStatus:    string(meta.Status),
+			NewStatus:    string(repository.JobStatusFailed),
+			ReasonCode:   reasonCode,
+			ReasonDetail: reasonDetail,
+		})
+	}
+	return nil
 }
-
 func (s *Store) RecordStarted(ctx context.Context, id int64, externalExecutionID string) error {
-	_, err := s.dal.DB.Exec(ctx, `UPDATE jobs SET status='running', started_at=COALESCE(started_at, now()), last_heartbeat_at=now(), external_execution_id=COALESCE(NULLIF($2,''), external_execution_id), reason_code=NULL, reason_detail=NULL WHERE job_id=$1 AND status IN ('dispatched','running')`, id, externalExecutionID)
-	return err
+	meta, err := s.loadJobEventMeta(ctx, s.dal.DB, id)
+	if err != nil {
+		return err
+	}
+	tag, err := s.dal.DB.Exec(ctx, `UPDATE jobs SET status='running', started_at=COALESCE(started_at, now()), last_heartbeat_at=now(), external_execution_id=COALESCE(NULLIF($2,''), external_execution_id), reason_code=NULL, reason_detail=NULL WHERE job_id=$1 AND status IN ('dispatched','running')`, id, externalExecutionID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() > 0 && meta.Status != repository.JobStatusRunning {
+		s.publishEvent(ctx, events.Event{
+			EventType:   "job.status_changed",
+			NamespaceID: meta.NamespaceID,
+			DAGID:       meta.DAGID,
+			RunID:       meta.RunID,
+			JobID:       meta.JobID,
+			NodeKey:     meta.NodeKey,
+			OldStatus:   string(meta.Status),
+			NewStatus:   string(repository.JobStatusRunning),
+		})
+	}
+	return nil
 }
-
 func (s *Store) RecordHeartbeat(ctx context.Context, id int64, heartbeatAt time.Time, detail string) error {
-	_, err := s.dal.DB.Exec(ctx, `UPDATE jobs SET status=CASE WHEN status='dispatched' THEN 'running' ELSE status END, started_at=COALESCE(started_at, CASE WHEN status='dispatched' THEN now() ELSE started_at END), last_heartbeat_at=$2, reason_detail=CASE WHEN NULLIF($3,'') IS NULL THEN reason_detail ELSE $3 END WHERE job_id=$1 AND status IN ('dispatched','running')`, id, heartbeatAt, detail)
-	return err
+	meta, err := s.loadJobEventMeta(ctx, s.dal.DB, id)
+	if err != nil {
+		return err
+	}
+	tag, err := s.dal.DB.Exec(ctx, `UPDATE jobs SET status=CASE WHEN status='dispatched' THEN 'running' ELSE status END, started_at=COALESCE(started_at, CASE WHEN status='dispatched' THEN now() ELSE started_at END), last_heartbeat_at=$2, reason_detail=CASE WHEN NULLIF($3,'') IS NULL THEN reason_detail ELSE $3 END WHERE job_id=$1 AND status IN ('dispatched','running')`, id, heartbeatAt, detail)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() > 0 {
+		s.publishEvent(ctx, events.Event{
+			EventType:    "job.heartbeat",
+			NamespaceID:  meta.NamespaceID,
+			DAGID:        meta.DAGID,
+			RunID:        meta.RunID,
+			JobID:        meta.JobID,
+			NodeKey:      meta.NodeKey,
+			OldStatus:    string(meta.Status),
+			NewStatus:    string(meta.Status),
+			ReasonDetail: detail,
+		})
+	}
+	return nil
 }
-
 func (s *Store) RecordCompletion(ctx context.Context, id int64, success bool, reasonCode, reasonDetail string) error {
 	status := repository.JobStatusSucceeded
 	if !success {
 		status = repository.JobStatusFailed
 	}
-	_, err := s.dal.DB.Exec(ctx, `UPDATE jobs SET status=$2::job_status, finished_at=now(), reason_code=NULLIF($3,''), reason_detail=NULLIF($4,''), last_error=NULLIF($4,''), lease_owner=NULL, lease_until=NULL WHERE job_id=$1 AND status IN ('dispatched','running')`, id, status, reasonCode, reasonDetail)
+
+	meta, err := s.loadJobEventMeta(ctx, s.dal.DB, id)
 	if err != nil {
 		return err
+	}
+
+	tag, err := s.dal.DB.Exec(ctx, `UPDATE jobs SET status=$2::job_status, finished_at=now(), reason_code=NULLIF($3,''), reason_detail=NULLIF($4,''), last_error=NULLIF($4,''), lease_owner=NULL, lease_until=NULL WHERE job_id=$1 AND status IN ('dispatched','running')`, id, status, reasonCode, reasonDetail)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return nil
 	}
 	if success {
 		_, err = s.dal.DB.Exec(ctx, `
@@ -1261,27 +1496,106 @@ SET ready = NOT EXISTS (
     WHERE d.child_job_id = f.job_id AND p.status <> 'succeeded'
 )
 WHERE f.job_id IN (SELECT child_job_id FROM job_dependencies WHERE parent_job_id=$1)`, id)
+		if err != nil {
+			return err
+		}
 	}
-	return err
+	s.publishEvent(ctx, events.Event{
+		EventType:    "job.status_changed",
+		NamespaceID:  meta.NamespaceID,
+		DAGID:        meta.DAGID,
+		RunID:        meta.RunID,
+		JobID:        meta.JobID,
+		NodeKey:      meta.NodeKey,
+		OldStatus:    string(meta.Status),
+		NewStatus:    string(status),
+		ReasonCode:   reasonCode,
+		ReasonDetail: reasonDetail,
+	})
+	return nil
 }
-
 func (s *Store) MarkLost(ctx context.Context, id int64, reasonCode, reasonDetail string) error {
-	_, err := s.dal.DB.Exec(ctx, `UPDATE jobs SET status='lost', finished_at=now(), reason_code=$2, reason_detail=$3, last_error=$3, lease_owner=NULL, lease_until=NULL WHERE job_id=$1 AND status IN ('dispatched','running','dispatching')`, id, reasonCode, reasonDetail)
-	return err
+	meta, err := s.loadJobEventMeta(ctx, s.dal.DB, id)
+	if err != nil {
+		return err
+	}
+	tag, err := s.dal.DB.Exec(ctx, `UPDATE jobs SET status='lost', finished_at=now(), reason_code=$2, reason_detail=$3, last_error=$3, lease_owner=NULL, lease_until=NULL WHERE job_id=$1 AND status IN ('dispatched','running','dispatching')`, id, reasonCode, reasonDetail)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() > 0 {
+		s.publishEvent(ctx, events.Event{
+			EventType:    "job.status_changed",
+			NamespaceID:  meta.NamespaceID,
+			DAGID:        meta.DAGID,
+			RunID:        meta.RunID,
+			JobID:        meta.JobID,
+			NodeKey:      meta.NodeKey,
+			OldStatus:    string(meta.Status),
+			NewStatus:    string(repository.JobStatusLost),
+			ReasonCode:   reasonCode,
+			ReasonDetail: reasonDetail,
+		})
+	}
+	return nil
 }
-
 func (s *Store) MarkMissed(ctx context.Context, id int64, reasonCode, reasonDetail string) error {
-	_, err := s.dal.DB.Exec(ctx, `UPDATE jobs SET status='missed', finished_at=now(), reason_code=$2, reason_detail=$3, last_error=$3, lease_owner=NULL, lease_until=NULL WHERE job_id=$1`, id, reasonCode, reasonDetail)
-	return err
+	meta, err := s.loadJobEventMeta(ctx, s.dal.DB, id)
+	if err != nil {
+		return err
+	}
+	tag, err := s.dal.DB.Exec(ctx, `UPDATE jobs SET status='missed', finished_at=now(), reason_code=$2, reason_detail=$3, last_error=$3, lease_owner=NULL, lease_until=NULL WHERE job_id=$1`, id, reasonCode, reasonDetail)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() > 0 {
+		s.publishEvent(ctx, events.Event{
+			EventType:    "job.status_changed",
+			NamespaceID:  meta.NamespaceID,
+			DAGID:        meta.DAGID,
+			RunID:        meta.RunID,
+			JobID:        meta.JobID,
+			NodeKey:      meta.NodeKey,
+			OldStatus:    string(meta.Status),
+			NewStatus:    string(repository.JobStatusMissed),
+			ReasonCode:   reasonCode,
+			ReasonDetail: reasonDetail,
+		})
+	}
+	return nil
 }
-
+func (s *Store) MarkBlocked(ctx context.Context, id int64, reasonCode, reasonDetail string) error {
+	meta, err := s.loadJobEventMeta(ctx, s.dal.DB, id)
+	if err != nil {
+		return err
+	}
+	tag, err := s.dal.DB.Exec(ctx, `UPDATE jobs SET status='blocked', finished_at=now(), reason_code=$2, reason_detail=$3, last_error=$3, lease_owner=NULL, lease_until=NULL WHERE job_id=$1 AND status='waiting'`, id, reasonCode, reasonDetail)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() > 0 {
+		s.publishEvent(ctx, events.Event{
+			EventType:    "job.status_changed",
+			NamespaceID:  meta.NamespaceID,
+			DAGID:        meta.DAGID,
+			RunID:        meta.RunID,
+			JobID:        meta.JobID,
+			NodeKey:      meta.NodeKey,
+			OldStatus:    string(meta.Status),
+			NewStatus:    string(repository.JobStatusBlocked),
+			ReasonCode:   reasonCode,
+			ReasonDetail: reasonDetail,
+		})
+	}
+	return nil
+}
 func (s *Store) FindWaitingBlockedByFailedDependency(ctx context.Context, before time.Time, limit int) ([]*repository.Job, error) {
 	rows, err := s.dal.DB.Query(ctx, `
 SELECT DISTINCT j.job_id, j.run_id, j.status, j.priority, j.due_at, j.node_key, j.job_definition_id::text
 FROM jobs j
 JOIN job_dependencies d ON d.child_job_id=j.job_id
 JOIN jobs p ON p.job_id=d.parent_job_id
-WHERE j.status='waiting' AND j.due_at <= $1 AND p.status IN ('failed','lost','missed','cancelled','skipped')
+WHERE j.status='waiting' AND j.due_at <= $1 AND p.status IN ('failed','lost','missed','blocked','cancelled','skipped')
 ORDER BY j.due_at, j.job_id
 LIMIT $2`, before, limit)
 	if err != nil {
@@ -1351,6 +1665,162 @@ func (s *Store) FindStaleRunning(ctx context.Context, before time.Time, limit in
 	return out, rows.Err()
 }
 
+func (s *Store) ListProblemJobs(ctx context.Context, namespaceID string, dagID *string, statuses []repository.JobStatus, limit int) ([]repository.ProblemJob, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if len(statuses) == 0 {
+		statuses = []repository.JobStatus{repository.JobStatusFailed, repository.JobStatusLost, repository.JobStatusMissed, repository.JobStatusBlocked, repository.JobStatusCancelled, repository.JobStatusSkipped}
+	}
+	args := []any{namespaceID, statuses, limit}
+	query := `
+SELECT j.job_id, j.run_id, d.namespace_id::text, dr.dag_id::text, d.name, j.node_key, j.display_name, j.status, j.dispatch_attempts,
+       j.reason_code, j.reason_detail, j.last_error, j.started_at, j.finished_at, COALESCE(f.ready, FALSE)
+FROM jobs j
+JOIN dag_runs dr ON dr.run_id=j.run_id
+JOIN dags d ON d.dag_id=dr.dag_id
+LEFT JOIN job_frontier f ON f.job_id=j.job_id
+WHERE d.namespace_id=$1::uuid
+  AND j.status = ANY($2::job_status[])`
+	if dagID != nil && *dagID != "" {
+		query += ` AND dr.dag_id=$4::uuid`
+		args = []any{namespaceID, statuses, limit, *dagID}
+	}
+	query += `
+ORDER BY COALESCE(j.finished_at, j.started_at, j.due_at) DESC, j.job_id DESC
+LIMIT $3`
+	rows, err := s.dal.DB.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []repository.ProblemJob
+	for rows.Next() {
+		var pj repository.ProblemJob
+		var reasonCode, reasonDetail, lastErr stdsql.NullString
+		var started, finished stdsql.NullTime
+		if err := rows.Scan(&pj.JobID, &pj.RunID, &pj.NamespaceID, &pj.DAGID, &pj.DAGName, &pj.NodeKey, &pj.DisplayName, &pj.Status, &pj.DispatchAttempts, &reasonCode, &reasonDetail, &lastErr, &started, &finished, &pj.IsReady); err != nil {
+			return nil, err
+		}
+		pj.ReasonCode = nullStringPtr(reasonCode)
+		pj.ReasonDetail = nullStringPtr(reasonDetail)
+		pj.LastError = nullStringPtr(lastErr)
+		pj.StartedAt = timePtr(started)
+		pj.FinishedAt = timePtr(finished)
+		pj.IsRestartable = pj.Status == repository.JobStatusFailed || pj.Status == repository.JobStatusLost || pj.Status == repository.JobStatusMissed || pj.Status == repository.JobStatusBlocked || pj.Status == repository.JobStatusCancelled || pj.Status == repository.JobStatusSkipped
+		out = append(out, pj)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) RestartJob(ctx context.Context, namespaceID string, jobID int64, opts repository.RestartJobOptions) (*repository.RestartJobResult, error) {
+	tx, err := s.dal.DB.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	rootMeta, err := s.loadJobEventMeta(ctx, tx, jobID)
+	if err != nil {
+		return nil, err
+	}
+
+	var runID int64
+	var status repository.JobStatus
+	if err := tx.QueryRow(ctx, `
+SELECT j.run_id, j.status
+FROM jobs j
+JOIN dag_runs dr ON dr.run_id=j.run_id
+JOIN dags d ON d.dag_id=dr.dag_id
+WHERE j.job_id=$1 AND d.namespace_id=$2::uuid`, jobID, namespaceID).Scan(&runID, &status); err != nil {
+		return nil, err
+	}
+	switch status {
+	case repository.JobStatusFailed, repository.JobStatusLost, repository.JobStatusMissed, repository.JobStatusBlocked, repository.JobStatusCancelled, repository.JobStatusSkipped:
+	default:
+		return nil, fmt.Errorf("job %d with status %s is not restartable", jobID, status)
+	}
+	rows, err := tx.Query(ctx, `
+WITH RECURSIVE affected AS (
+  SELECT $1::bigint AS job_id
+  UNION ALL
+  SELECT d.child_job_id
+  FROM job_dependencies d
+  JOIN affected a ON a.job_id=d.parent_job_id
+  WHERE $2
+)
+SELECT DISTINCT job_id FROM affected ORDER BY job_id`, jobID, opts.Cascade)
+	if err != nil {
+		return nil, err
+	}
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("job %d not found", jobID)
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM job_queue WHERE job_id = ANY($1)`, ids); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, `
+UPDATE jobs
+SET status='waiting',
+    lease_owner=NULL,
+    lease_until=NULL,
+    dispatched_at=NULL,
+    started_at=NULL,
+    last_heartbeat_at=NULL,
+    finished_at=NULL,
+    external_execution_id=NULL,
+    reason_code=NULL,
+    reason_detail=NULL,
+    last_error=NULL
+WHERE job_id = ANY($1)`, ids); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, `
+UPDATE job_frontier f
+SET ready = NOT EXISTS (
+    SELECT 1
+    FROM job_dependencies d
+    JOIN jobs p ON p.job_id=d.parent_job_id
+    WHERE d.child_job_id = f.job_id
+      AND p.status <> 'succeeded'
+)
+WHERE f.job_id = ANY($1)`, ids); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE dag_runs SET finished_at=NULL WHERE run_id=$1`, runID); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	if err := s.RefreshStatus(ctx, runID); err != nil {
+		return nil, err
+	}
+	cascade := opts.Cascade
+	s.publishEvent(ctx, events.Event{
+		EventType:   "job.restarted",
+		NamespaceID: rootMeta.NamespaceID,
+		DAGID:       rootMeta.DAGID,
+		RunID:       rootMeta.RunID,
+		JobID:       rootMeta.JobID,
+		NodeKey:     rootMeta.NodeKey,
+		OldStatus:   string(rootMeta.Status),
+		NewStatus:   string(repository.JobStatusWaiting),
+		Cascade:     &cascade,
+		ResetJobIDs: ids,
+	})
+	return &repository.RestartJobResult{JobID: jobID, RunID: runID, Cascade: opts.Cascade, ResetJobIDs: ids, RestartedAt: time.Now().UTC()}, nil
+}
 func (s *Store) GetReadiness(ctx context.Context, id int64) (*repository.JobReadiness, error) {
 	var r repository.JobReadiness
 	if err := s.dal.DB.QueryRow(ctx, `

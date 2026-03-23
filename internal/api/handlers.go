@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/edkuperman/chronosched/internal/repository"
@@ -369,6 +370,72 @@ func (h *Handler) getRunGraph(w http.ResponseWriter, r *http.Request) {
 }
 
 // ===== Jobs =====
+type restartJobRequest struct {
+	Cascade *bool `json:"cascade,omitempty"`
+}
+
+func parseJobStatusesCSV(raw string) []repository.JobStatus {
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]repository.JobStatus, 0, len(parts))
+	for _, part := range parts {
+		v := repository.JobStatus(strings.TrimSpace(part))
+		if v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+func (h *Handler) listNamespaceProblemJobs(w http.ResponseWriter, r *http.Request) {
+	namespaceID := chi.URLParam(r, "namespace_id")
+	var dagID *string
+	if raw := strings.TrimSpace(r.URL.Query().Get("dag_id")); raw != "" {
+		dagID = &raw
+	}
+	limit := 100
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 && n <= 1000 {
+			limit = n
+		}
+	}
+	items, err := h.Repos.Jobs.ListProblemJobs(r.Context(), namespaceID, dagID, parseJobStatusesCSV(r.URL.Query().Get("status")), limit)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (h *Handler) restartNamespaceJob(w http.ResponseWriter, r *http.Request) {
+	jobID, err := parseInt64Param(r, "job_id")
+	if err != nil {
+		http.Error(w, "invalid job_id", http.StatusBadRequest)
+		return
+	}
+	req := restartJobRequest{}
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&req)
+	}
+	cascade := true
+	if raw := strings.TrimSpace(r.URL.Query().Get("cascade")); raw != "" {
+		if parsed, err := strconv.ParseBool(raw); err == nil {
+			cascade = parsed
+		}
+	}
+	if req.Cascade != nil {
+		cascade = *req.Cascade
+	}
+	result, err := h.Repos.Jobs.RestartJob(r.Context(), chi.URLParam(r, "namespace_id"), jobID, repository.RestartJobOptions{Cascade: cascade})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
 func (h *Handler) getJobReadiness(w http.ResponseWriter, r *http.Request) {
 	jobID, err := parseInt64Param(r, "job_id")
 	if err != nil {

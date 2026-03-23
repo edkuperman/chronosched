@@ -125,6 +125,13 @@ func (f *fakeJobs) RecordHeartbeat(context.Context, int64, time.Time, string) er
 func (f *fakeJobs) RecordCompletion(context.Context, int64, bool, string, string) error { return nil }
 func (f *fakeJobs) MarkLost(context.Context, int64, string, string) error               { return nil }
 func (f *fakeJobs) MarkMissed(context.Context, int64, string, string) error             { return nil }
+func (f *fakeJobs) MarkBlocked(context.Context, int64, string, string) error            { return nil }
+func (f *fakeJobs) ListProblemJobs(context.Context, string, *string, []repository.JobStatus, int) ([]repository.ProblemJob, error) {
+	return nil, nil
+}
+func (f *fakeJobs) RestartJob(context.Context, string, int64, repository.RestartJobOptions) (*repository.RestartJobResult, error) {
+	return nil, nil
+}
 func (f *fakeJobs) GetReadiness(context.Context, int64) (*repository.JobReadiness, error) {
 	return nil, nil
 }

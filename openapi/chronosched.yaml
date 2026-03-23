@@ -88,6 +88,64 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/JobDefinitionList'
+  /api/v1/namespaces/{namespace_id}/jobs/problems:
+    get:
+      tags:
+      - Jobs
+      summary: List problem jobs in a namespace
+      parameters:
+      - $ref: '#/components/parameters/NamespaceID'
+      - name: dag_id
+        in: query
+        schema:
+          type: string
+      - name: status
+        in: query
+        description: Comma-separated job statuses to include.
+        schema:
+          type: string
+      - name: limit
+        in: query
+        schema:
+          type: integer
+      responses:
+        '200':
+          description: Problem jobs.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ProblemJob'
+  /api/v1/namespaces/{namespace_id}/jobs/{job_id}/restart:
+    post:
+      tags:
+      - Jobs
+      summary: Restart a job inside a namespace
+      parameters:
+      - $ref: '#/components/parameters/NamespaceID'
+      - $ref: '#/components/parameters/JobID'
+      - name: cascade
+        in: query
+        schema:
+          type: boolean
+        description: Defaults to true. When true, reset downstream dependent jobs too.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RestartJobRequest'
+      responses:
+        '200':
+          description: Restarted job.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RestartJobResult'
   /api/v1/job-definitions:
     post:
       tags:
@@ -814,6 +872,7 @@ components:
           - failed
           - lost
           - missed
+          - blocked
           - cancelled
           - skipped
         due_at:
@@ -870,6 +929,75 @@ components:
           type: string
         status:
           type: string
+    ProblemJob:
+      type: object
+      properties:
+        job_id:
+          type: integer
+          format: int64
+        run_id:
+          type: integer
+          format: int64
+        namespace_id:
+          type: string
+        dag_id:
+          type: string
+        dag_name:
+          type: string
+        node_key:
+          type: string
+        display_name:
+          type: string
+        status:
+          type: string
+        dispatch_attempts:
+          type: integer
+        reason_code:
+          type: string
+          nullable: true
+        reason_detail:
+          type: string
+          nullable: true
+        last_error:
+          type: string
+          nullable: true
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
+        is_ready:
+          type: boolean
+        is_restartable:
+          type: boolean
+    RestartJobRequest:
+      type: object
+      properties:
+        cascade:
+          type: boolean
+          nullable: true
+    RestartJobResult:
+      type: object
+      properties:
+        job_id:
+          type: integer
+          format: int64
+        run_id:
+          type: integer
+          format: int64
+        cascade:
+          type: boolean
+        reset_job_ids:
+          type: array
+          items:
+            type: integer
+            format: int64
+        restarted_at:
+          type: string
+          format: date-time
     JobReadiness:
       type: object
       properties:

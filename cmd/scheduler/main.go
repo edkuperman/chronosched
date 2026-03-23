@@ -7,6 +7,7 @@ import (
 	"syscall"
 
 	"github.com/edkuperman/chronosched/internal/dal/sql"
+	"github.com/edkuperman/chronosched/internal/events"
 	"github.com/edkuperman/chronosched/internal/logger"
 	"github.com/edkuperman/chronosched/internal/repository"
 	"github.com/edkuperman/chronosched/internal/scheduler"
@@ -30,6 +31,7 @@ func main() {
 	defer pool.Close()
 
 	dal := sql.NewSQLDAL(pool)
+	events.SetDefaultPublisher(events.NewLoggerPublisher())
 	repos := &repository.Repos{
 		Namespaces:  sql.NewNamespaceSQL(dal),
 		Definitions: sql.NewJobDefinitionSQL(dal),

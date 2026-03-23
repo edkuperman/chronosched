@@ -46,6 +46,9 @@ func NewHTTPHandler(h *Handler) http.Handler {
 		r.Get("/runs/{run_id}/jobs", h.listRunJobs)
 		r.Get("/runs/{run_id}/graph", h.getRunGraph)
 
+		r.Get("/namespaces/{namespace_id}/jobs/problems", h.listNamespaceProblemJobs)
+		r.Post("/namespaces/{namespace_id}/jobs/{job_id}/restart", h.restartNamespaceJob)
+
 		r.Get("/jobs/{job_id}/readiness", h.getJobReadiness)
 		r.Post("/jobs/{job_id}/events", h.postJobEvent)
 		r.Get("/admin/check/global-cycles", h.checkGlobalCycles)
