@@ -36,7 +36,6 @@ Open the API UI:
 
 http://localhost:8080/
 
-
 ## Design goals
 
 Chronosched focuses on a few core design principles:
@@ -48,7 +47,7 @@ Chronosched focuses on a few core design principles:
 - **Durable state management** backed by PostgreSQL
 - **API-first integration** with external workers and services
 - **Explicit orchestration model** separating task definitions from workflow structure
-
+- **AI-assisted failure analysis** to explain workflow failures and recovery steps
 
 ## Why this design
 
@@ -230,6 +229,15 @@ cron / interval optional]
 
 The same definitions can be reused while the orchestration evolves through new DAG versions.
 
+## Design tradeoffs
+
+Chronosched intentionally makes several design tradeoffs:
+
+- PostgreSQL is used as the single source of truth, prioritizing consistency and simplicity over horizontal scalability
+- The execution model is callback-based (REST), favoring integration simplicity over tightly coupled workers
+- DAG versions are immutable, prioritizing safety and reproducibility over in-place mutation
+- Scheduling and orchestration are separated, improving reuse at the cost of additional conceptual complexity
+
 ## Job execution lifecycle
 
 ```mermaid
@@ -331,8 +339,10 @@ All public endpoints are rooted under **`/api/v1`**.
 - `GET /api/v1/runs/{run_id}`
 - `GET /api/v1/runs/{run_id}/jobs`
 - `GET /api/v1/runs/{run_id}/graph`
+- `GET /api/v1/runs/{run_id}/summary`
 - `GET /api/v1/jobs/{job_id}/readiness`
 - `POST /api/v1/jobs/{job_id}/events`
+- `GET /api/v1/namespaces/{namespace_id}/jobs/problems`
 
 ### Internal worker gateway
 
@@ -387,22 +397,22 @@ The Python demo service under `client/python` exposes callback endpoints used by
 
 The demo defines three jobs:
 
-• hello-5s — a REST callback job scheduled every 5 seconds
-• hello-10s — a REST callback job scheduled every 10 seconds
-• reportJob — a REST callback job representing a downstream summary/report step
+- **hello-5s** — a REST callback job scheduled every 5 seconds
+- **hello-10s** — a REST callback job scheduled every 10 seconds
+- **reportJob** — a REST callback job representing a downstream summary/report step
 
 Their dependencies are:
 
-• hello-10s depends on hello-5s
-• reportJob depends on hello-5s
-• reportJob depends on hello-10s
+- **hello-10s** depends on **hello-5s**
+- **reportJob** depends on **hello-5s**
+- **reportJob** depends on **hello-10s**
 
 This creates a small DAG containing two common patterns:
 
-• Sequential dependency: hello-5s → hello-10s
-• Fan-in dependency: hello-5s and hello-10s both feed into reportJob
+- **Sequential dependency:** `hello-5s → hello-10s`
+- **Fan-in dependency:** `hello-5s` and `hello-10s` both feed into `reportJob`
 
-In other words, reportJob sits downstream of both upstream jobs and represents a node that requires multiple predecessors to complete before it can run successfully.
+In other words, `reportJob` sits downstream of both upstream jobs and requires multiple predecessors to complete before it can run successfully.
 
 ```mermaid
 graph TD
@@ -443,15 +453,15 @@ The example below recreates the **same fan-out / fan-in DAG used by the Python d
 
 The workflow contains three nodes:
 
-• **hello5** → executes the `hello-5s` job definition  
-• **hello10** → executes the `hello-10s` job definition  
-• **reportJob** → executes the `reportJob` job definition  
+- **hello5** → executes the `hello-5s` job definition
+- **hello10** → executes the `hello-10s` job definition
+- **reportJob** → executes the `reportJob` job definition
 
 with the following dependencies:
 
-• `hello5 → hello10`  
-• `hello5 → reportJob`  
-• `hello10 → reportJob`
+- `hello5 → hello10`
+- `hello5 → reportJob`
+- `hello10 → reportJob`
 
 This creates a **fan-out / fan-in DAG** where `hello5` fans out to two downstream nodes, and `reportJob` fans in from both upstream jobs.
 
@@ -465,7 +475,9 @@ All nodes are created as jobs immediately, and execution proceeds according to d
 ```bash
 BASE=http://localhost:8080
 
-NS=$(curl -s -X POST "$BASE/api/v1/namespaces"   -H 'Content-Type: application/json'   -d '{"name":"demo"}' | jq -r '.id')
+NS=$(curl -s -X POST "$BASE/api/v1/namespaces" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"demo"}' | jq -r '.id')
 
 echo "$NS"
 ```
@@ -473,7 +485,9 @@ echo "$NS"
 ### 2. Create job definitions
 
 ```bash
-HELLO5=$(curl -s -X POST "$BASE/api/v1/job-definitions"   -H 'Content-Type: application/json'   -d '{
+HELLO5=$(curl -s -X POST "$BASE/api/v1/job-definitions" \
+  -H 'Content-Type: application/json' \
+  -d '{
     "namespace_id":"'"$NS"'",
     "name":"hello-5s",
     "description":"callback demo",
@@ -482,7 +496,9 @@ HELLO5=$(curl -s -X POST "$BASE/api/v1/job-definitions"   -H 'Content-Type: appl
     "is_enabled":true
   }' | jq -r '.id')
 
-HELLO10=$(curl -s -X POST "$BASE/api/v1/job-definitions"   -H 'Content-Type: application/json'   -d '{
+HELLO10=$(curl -s -X POST "$BASE/api/v1/job-definitions" \
+  -H 'Content-Type: application/json' \
+  -d '{
     "namespace_id":"'"$NS"'",
     "name":"hello-10s",
     "description":"callback demo",
@@ -491,7 +507,9 @@ HELLO10=$(curl -s -X POST "$BASE/api/v1/job-definitions"   -H 'Content-Type: app
     "is_enabled":true
   }' | jq -r '.id')
 
-REPORT=$(curl -s -X POST "$BASE/api/v1/job-definitions"   -H 'Content-Type: application/json'   -d '{
+REPORT=$(curl -s -X POST "$BASE/api/v1/job-definitions" \
+  -H 'Content-Type: application/json' \
+  -d '{
     "namespace_id":"'"$NS"'",
     "name":"reportJob",
     "description":"callback demo",
@@ -504,7 +522,9 @@ REPORT=$(curl -s -X POST "$BASE/api/v1/job-definitions"   -H 'Content-Type: appl
 ### 3. Create a DAG
 
 ```bash
-DAG=$(curl -s -X POST "$BASE/api/v1/namespaces/$NS/dags"   -H 'Content-Type: application/json'   -d '{"name":"demo-dag","description":"callback workflow"}' | jq -r '.id')
+DAG=$(curl -s -X POST "$BASE/api/v1/namespaces/$NS/dags" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"demo-dag","description":"callback workflow"}' | jq -r '.id')
 
 echo "$DAG"
 ```
@@ -512,7 +532,9 @@ echo "$DAG"
 ### 4. Publish a DAG version
 
 ```bash
-VER=$(curl -s -X POST "$BASE/api/v1/dags/$DAG/versions"   -H 'Content-Type: application/json'   -d '{
+VER=$(curl -s -X POST "$BASE/api/v1/dags/$DAG/versions" \
+  -H 'Content-Type: application/json' \
+  -d '{
     "version_note":"initial version",
     "nodes":[
       {"node_key":"hello5","display_name":"Hello 5s","job_definition_id":"'"$HELLO5"'"},
@@ -538,7 +560,9 @@ curl -i -X POST "$BASE/api/v1/dag-versions/$VER/activate"
 ### 6. Trigger a manual run
 
 ```bash
-RUN=$(curl -s -X POST "$BASE/api/v1/dags/$DAG/runs"   -H 'Content-Type: application/json'   -d '{}' | jq -r '.id')
+RUN=$(curl -s -X POST "$BASE/api/v1/dags/$DAG/runs" \
+  -H 'Content-Type: application/json' \
+  -d '{}' | jq -r '.id')
 
 echo "$RUN"
 ```
@@ -546,12 +570,6 @@ echo "$RUN"
 ### 7. Inspect runtime state
 
 ```bash
-curl -s "$BASE/api/v1/runs/$RUN" | jq
-curl -s "$BASE/api/v1/runs/$RUN/jobs" | jq
-curl -s "$BASE/api/v1/runs/$RUN/graph" | jq
-```
-
-bash
 curl -s "$BASE/api/v1/runs/$RUN" | jq
 curl -s "$BASE/api/v1/runs/$RUN/jobs" | jq
 curl -s "$BASE/api/v1/runs/$RUN/graph" | jq
@@ -580,36 +598,9 @@ docker compose -f docker-compose.yml -f docker-compose.debug.yml up --build
 
 Helper scripts are also available under `internal/scripts/`.
 
-## Current status and limitations
-
-This is still an experimental project.
-
-Current limitations include:
-
-- job definitions are not versioned independently
-- retry, cancellation, and recovery semantics are intentionally minimal
-- execution support is currently centered on the existing worker dispatch model and REST callbacks
-- there is no large built-in UI beyond the API surface and OpenAPI document
-
-## Project status
-
-Chronosched is an experimental project exploring
-a database-backed DAG scheduler architecture.
-
-The repository is published for reference and demonstration
-purposes. External contributions are not being accepted at
-this time.
-
-## License
-
-See `LICENSE`.
-
-
----
-
 ## Restart and recovery
 
-Jobs can be restarted within a run to recover from failures.
+Jobs can be restarted within a run to recover from failures without creating a new run.
 
 Endpoint:
 
@@ -639,17 +630,28 @@ Behavior:
 - run_now — job becomes immediately eligible
 - next_schedule — job resumes at next scheduled time
 
-### Scheduling gate
+This is useful when:
 
-jobs.eligible_at TIMESTAMPTZ
+- a transient failure is corrected outside the scheduler
+- a downstream blocked job should be retried after its dependency succeeds
+- an operator wants to recover an in-flight workflow instead of rerunning the whole DAG
 
-Scheduler condition:
+Exact restart behavior depends on the current job state and dependency readiness.
 
-status = 'waiting'
-AND ready = true
-AND (eligible_at IS NULL OR eligible_at <= now())
+## Events
 
----
+Chronosched uses explicit job events to move runtime state forward.
+
+Typical callback-driven events include:
+
+- `started`
+- `heartbeat`
+- `succeeded`
+- `failed`
+
+The worker dispatches work to an external callback target, and the callback service posts events back to Chronosched with `POST /api/v1/jobs/{job_id}/events`.
+
+This makes the execution model visible, durable, and easy to integrate with external services.
 
 ## Problem jobs API
 
@@ -659,45 +661,18 @@ Optional filters:
 - dag_id
 - status
 
-Default problem states:
-- failed
-- lost
-- missed
-- blocked
-
-
-
-
-
 ### Default problem states
 
-| Status   | Meaning | Typical cause | Retry guidance |
-|----------|---------|---------------|----------------|
-| `failed` | Job executed and returned an explicit failure (e.g., non-200 response or application error). | Application error, bad input, downstream service returned error | Safe to retry after fixing the root cause; idempotent handlers recommended. |
-| `lost`   | Job was dispatched but no completion was recorded before lease expiration (worker crash, timeout, or network issue). Outcome is unknown. | Worker crash, pod eviction, network partition, long-running task exceeding lease | Retry with caution; ensure idempotency or use de-duplication since the job may still be running. |
-| `missed` | Job never executed within its scheduling window due to delay, backlog, or capacity constraints. | Scheduler lag, queue backlog, insufficient workers, tight SLA window | Safe to retry or reschedule; no side effects occurred. |
-| `blocked`| Job cannot run because one or more upstream dependencies are in a terminal non-success state. | Upstream job failed/lost/missed | Resolve upstream failures, then restart (optionally cascade) to unblock downstream jobs. |
+The namespace problems view and recovery flows commonly surface these problem states:
 
----
+| State     | Meaning | Typical cause | Retry guidance |
+|-----------|---------|---------------|----------------|
+| `failed`  | The job ran and reported failure. | Application error, bad payload, exception, remote callback failure. | Inspect the failure reason and logs, correct the issue, then restart or rerun. |
+| `lost`    | The job started or was dispatched, but completion was never recorded. | Worker crash, callback never returned, heartbeat timeout, infrastructure interruption. | Investigate worker and callback logs first; retry only after confirming the work is safe to re-run. |
+| `missed`  | A scheduled execution window was not materialized or was not picked up in time. | Scheduler downtime, backlog, clock issues, or intentionally minimal recovery semantics. | Review scheduler health and timing guarantees before replaying work. |
+| `blocked` | The job could not run because an upstream dependency failed or never became ready. | A parent node failed, was lost, or otherwise prevented readiness. | Fix the upstream problem first; then restart the blocked job or rerun the affected portion of the workflow. |
 
-## Event model
-
-Chronosched produces lifecycle events for runs and jobs.
-
-Typical events include:
-
-- run.created
-- run.status_changed
-- job.status_changed
-- job.heartbeat
-- job.restarted
-
-Events include identifiers such as namespace, DAG, run, and job IDs,
-and can be consumed for logging, analytics, or warehousing.
-
-
-
-## Run failure summary analysis
+## AI-assisted summaries
 
 Chronosched can generate an AI-assisted summary for a run with:
 
@@ -705,37 +680,106 @@ Chronosched can generate an AI-assisted summary for a run with:
 GET /api/v1/runs/{run_id}/summary
 ```
 
-The endpoint builds a compact run context from the run graph, failed node status, upstream successes, downstream impacted nodes, and recorded reason fields. When `OPENAI_API_KEY` is configured, the server sends that context to OpenAI and returns a structured response containing:
+The endpoint builds a compact run context from the run graph, failed node status, upstream successes, downstream impacted nodes, and recorded reason fields.
 
-- `failed_node`
-- `type`
+When `OPENAI_API_KEY` is configured, the server sends that context to OpenAI and returns a structured response containing:
+
 - `cause`
 - `impact`
 - `next_steps`
 - `confidence`
 - `retry`
+- `source`
+- `model`
+- `generated_at`
 
-If OpenAI is not configured or the API call fails, the endpoint still returns a deterministic heuristic summary so local debugging continues to work.
+Without `OPENAI_API_KEY`, the endpoint still returns a deterministic heuristic summary built from the same run context.
 
 ### Secure local key setup
 
-Create a local `.env` file from `.env.example` and keep your real key there. `.env` is ignored by Git, so it will not be committed.
+Create a local `.env` file from `.env.example` and store your API key there.  
+The `.env` file is ignored by Git and will not be committed.
 
 ```bash
 cp .env.example .env
-# then edit .env and set OPENAI_API_KEY
+# edit .env and set OPENAI_API_KEY
 ```
+Docker Compose automatically loads .env from the project root.
 
-Docker Compose will automatically read `.env` from the project root. You can also supply a different file explicitly:
+You can also specify an environment file explicitly:
 
 ```bash
 docker compose --env-file .env up --build
 ```
-
-You can still override on the command line for a one-off local run:
+For one-off runs, you can override via the command line:
 
 ```bash
 OPENAI_API_KEY=your_key_here docker compose up --build
 ```
+Avoid hard-coding API keys in source code, Dockerfiles, or checked-in compose files.
+For production environments, use a proper secret manager instead of .env files.
 
-Avoid hard-coding API keys in source, Dockerfiles, or checked-in compose files.
+## Callback demo service output
+
+The demo callback service also logs AI summary output for the intentionally failing secondary workflow.
+
+This section is placed near the end of the README on purpose: by this point, the scheduler model, dependency semantics, problem states, and AI summary endpoint have already been introduced, so the log output is easier to interpret.
+
+The secondary workflow intentionally produces two related summaries during a failure cycle:
+
+1. a summary for the **root failed node** (`hello_10s`)
+2. a summary for the **downstream blocked node** (`reportJob`)
+
+That is why the logs may show more than one AI summary for what looks like a single workflow failure.
+
+A simplified example looks like this:
+
+```text
+python-service-1  | 2026-03-23 08:41:05,777 INFO chronosched-python-demo Failure summary for run 11 (secondary): {
+python-service-1  |   'failed_node': 'reportJob',
+python-service-1  |   'type': 'dependency',
+python-service-1  |   'cause': 'reportJob was blocked by a failed upstream dependency: hello_10s failed with an intentional demo_failure error.',
+python-service-1  |   'impact': 'The focus run reportJob did not execute. hello_5s succeeded, but the failure in hello_10s prevented reportJob from starting.',
+python-service-1  |   'next_steps': [
+python-service-1  |     'Inspect hello_10s logs and failure path for the intentional demo_failure.',
+python-service-1  |     'Rerun reportJob only after hello_10s succeeds, or adjust the dependency if reportJob should not wait on hello_10s.'
+python-service-1  |   ],
+python-service-1  |   'confidence': 0.98,
+python-service-1  |   'retry': 'requires_manual_review',
+python-service-1  |   'source': 'openai'
+python-service-1  | }
+python-service-1  | 2026-03-23 08:41:07,592 INFO chronosched-python-demo Failure summary for run 9 (secondary): {
+python-service-1  |   'failed_node': 'hello_10s',
+python-service-1  |   'type': 'dependency',
+python-service-1  |   'cause': 'The focus node hello_10s failed with demo_failure: Intentional demo failure in 10-second workflow.',
+python-service-1  |   'impact': 'reportJob was blocked due to a failed dependency; hello_5s succeeded and did not appear impacted.',
+python-service-1  |   'next_steps': [
+python-service-1  |     'Inspect hello_10s logs and the demo_failure condition.',
+python-service-1  |     'Once hello_10s succeeds, retry reportJob to clear the blocked dependency.'
+python-service-1  |   ],
+python-service-1  |   'confidence': 0.99,
+python-service-1  |   'retry': 'requires_manual_review',
+python-service-1  |   'source': 'openai'
+python-service-1  | }
+```
+
+The full output is verbose because it includes the structured response plus the context used to build it.
+
+If you want to inspect the full raw payloads during the demo, check the Python service logs directly. The most important fields to read first are usually:
+
+- `failed_node`
+- `cause`
+- `impact`
+- `next_steps`
+- `retry`
+- `source`
+
+## Project scope
+
+Chronosched is designed as a reference implementation of a database-backed DAG scheduler architecture.
+
+To preserve a consistent and opinionated design, the repository is not currently accepting external contributions.
+
+## License
+
+See `LICENSE`.
