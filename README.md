@@ -242,15 +242,32 @@ Chronosched intentionally makes several design tradeoffs:
 
 ```mermaid
 flowchart LR
-    Due[Definition schedule becomes due] --> Scheduler[Scheduler creates run]
-    Scheduler --> Waiting[Jobs inserted as waiting or queued]
-    Waiting --> Ready[Dependencies satisfied]
-    Ready --> Lease[Worker leases queued job]
-    Lease --> Dispatch[Worker dispatches execution]
-    Dispatch --> Started[Callback posts started]
-    Started --> Heartbeat[Optional heartbeat]
-    Heartbeat --> Done[Callback posts succeeded or failed]
-    Done --> Refresh[Run status refreshed]
+    subgraph Phase1 [Initiation]
+        direction LR
+        Due[Definition schedule becomes due] --> Scheduler[Scheduler creates run]
+        Scheduler --> Waiting[Jobs inserted as waiting or queued]
+    end
+```
+
+```mermaid
+flowchart LR
+    subgraph Phase2 [Execution]
+        direction LR
+        Waiting --> Ready[Dependencies satisfied]
+        Ready --> Lease[Worker leases queued job]
+        Lease --> Dispatch[Worker dispatches execution]
+    end
+```
+
+```mermaid
+flowchart LR
+    subgraph Phase3 [Completion]
+        direction LR
+        Dispatch --> Started[Callback posts started]
+        Started --> Heartbeat[Optional heartbeat]
+        Heartbeat --> Done[Callback posts succeeded or failed]
+        Done --> Refresh[Run status refreshed]
+    end
 ```
 
 Common job states include:
