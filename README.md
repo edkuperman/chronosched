@@ -240,34 +240,38 @@ Chronosched intentionally makes several design tradeoffs:
 
 ## Job execution lifecycle
 
-```mermaid
-flowchart LR
-    subgraph Phase1 [Initiation]
-        direction LR
-        Due[Definition schedule becomes due] --> Scheduler[Scheduler creates run]
-        Scheduler --> Waiting[Jobs inserted as waiting or queued]
-    end
-```
+The lifecycle progresses from scheduling → execution → callback-driven completion.
+
+### Phase 1 — Initiation
 
 ```mermaid
 flowchart LR
-    subgraph Phase2 [Execution]
-        direction LR
-        Waiting --> Ready[Dependencies satisfied]
-        Ready --> Lease[Worker leases queued job]
-        Lease --> Dispatch[Worker dispatches execution]
-    end
+    Due[Definition schedule becomes due] --> Scheduler[Scheduler creates run]
+    Scheduler --> Waiting[Jobs inserted as waiting or queued]
 ```
+
+When dependencies are satisfied, jobs move to the execution phase.
+
+### Phase 2 — Execution
 
 ```mermaid
 flowchart LR
-    subgraph Phase3 [Completion]
-        direction LR
-        Dispatch --> Started[Callback posts started]
-        Started --> Heartbeat[Optional heartbeat]
-        Heartbeat --> Done[Callback posts succeeded or failed]
-        Done --> Refresh[Run status refreshed]
-    end
+    Waiting --> Ready[Dependencies satisfied]
+    Ready --> Lease[Worker leases queued job]
+    Lease --> Dispatch[Worker dispatches execution]
+```
+
+Once dispatched, execution is driven by callback events.
+
+### Phase 3 — Completion
+
+```mermaid
+flowchart LR
+    Dispatch --> Started[Callback posts started]
+    Started --> Done[Callback posts succeeded or failed]
+    Started --> Heartbeat[Optional heartbeat]
+    Heartbeat --> Done
+    Done --> Refresh[Run status refreshed]
 ```
 
 Common job states include:
