@@ -2,13 +2,13 @@
 
 Chronosched is a PostgreSQL-backed DAG scheduler written in Go.
 
-Its core idea is to treat **job definitions**, **schedules**, and **DAG orchestration** as separate first-class concepts.
-
 Chronosched separates three concerns into independent concepts:
 
 - **job definitions** describe reusable work
-- **schedules** belong to job definitions
+- **schedule bindings** determine when a DAG node runs
 - **DAG versions** define orchestration and dependencies
+
+The scheduler operates on **schedule bindings** as the canonical scheduling model. A job definition may still declare an inline `schedule` as a convenience; Chronosched materializes that into a schedule binding for each DAG node that references the definition.
 
 At runtime, the scheduler creates **runs**, and each run materializes one or more **jobs** that the worker executes.
 
@@ -59,7 +59,7 @@ For example, `sales-stats` might:
 - appear after `etl-load-sales` in one DAG
 - appear after `load -> validate` in another DAG
 
-The schedule stays attached to the definition, while dependency ordering stays attached to the DAG version.
+Inline schedules on job definitions are treated as shorthand. Chronosched converts them into per-node schedule bindings, which lets scheduling remain explicit at runtime while keeping configuration lightweight for common cases.
 
 That split makes reuse easier and allows workflows to evolve through new DAG versions without changing the underlying task definitions.
 
@@ -795,11 +795,15 @@ If you want to inspect the full raw payloads during the demo, check the Python s
 - `retry`
 - `source`
 
-## Project scope
+## Contributing
 
-Chronosched is designed as a reference implementation of a database-backed DAG scheduler architecture.
+This project accepts selective contributions.
 
-To preserve a consistent and opinionated design, the repository is not currently accepting external contributions.
+Bug fixes, documentation improvements, tests, and small targeted enhancements are welcome. Please open an issue before proposing larger feature changes so the direction can be discussed.
+
+The project is intentionally opinionated, and the overall architecture and direction are primarily driven by the maintainer to preserve consistency.
+
+Contributions that align with the existing design principles are more likely to be accepted.
 
 ## License
 

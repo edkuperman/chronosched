@@ -2,6 +2,7 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 DROP TABLE IF EXISTS cron_fires CASCADE;
 DROP TABLE IF EXISTS cron_state CASCADE;
+DROP TABLE IF EXISTS schedule_bindings CASCADE;
 DROP TABLE IF EXISTS job_queue CASCADE;
 DROP TABLE IF EXISTS job_frontier CASCADE;
 DROP TABLE IF EXISTS job_dependencies CASCADE;
@@ -91,6 +92,30 @@ CREATE TABLE dag_version_edges (
   UNIQUE(dag_version_id, from_node_id, to_node_id)
 );
 
+
+CREATE TABLE schedule_bindings (
+  binding_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  dag_version_id UUID NOT NULL REFERENCES dag_versions(dag_version_id) ON DELETE CASCADE,
+  node_id UUID NOT NULL REFERENCES dag_version_nodes(node_id) ON DELETE CASCADE,
+  definition_id UUID NOT NULL REFERENCES job_definitions(definition_id) ON DELETE CASCADE,
+  source_type TEXT NOT NULL DEFAULT 'definition_inline',
+  schedule_type TEXT NOT NULL,
+  cron_spec TEXT,
+  interval_seconds INT,
+  interval_start_at TIMESTAMPTZ,
+  timezone TEXT,
+  on_failure_policy TEXT NOT NULL DEFAULT 'continue',
+  is_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  is_paused BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(node_id),
+  CONSTRAINT chk_schedule_bindings_schedule CHECK (
+    (schedule_type = 'cron' AND cron_spec IS NOT NULL AND btrim(cron_spec) <> '' AND interval_seconds IS NULL AND interval_start_at IS NULL)
+    OR (schedule_type = 'interval' AND interval_seconds IS NOT NULL AND interval_seconds > 0 AND interval_start_at IS NOT NULL AND (cron_spec IS NULL OR btrim(cron_spec) = ''))
+  )
+);
+
 CREATE TABLE dag_runs (
   run_id BIGSERIAL PRIMARY KEY,
   dag_id UUID NOT NULL REFERENCES dags(dag_id) ON DELETE CASCADE,
@@ -167,6 +192,10 @@ CREATE TABLE cron_fires (
 CREATE INDEX idx_defs_namespace ON job_definitions(namespace_id, name);
 CREATE INDEX idx_defs_cron ON job_definitions(cron_spec) WHERE COALESCE(schedule_type,'') IN ('', 'cron') AND cron_spec IS NOT NULL AND btrim(cron_spec) <> '';
 CREATE INDEX idx_defs_interval ON job_definitions(interval_start_at, interval_seconds) WHERE schedule_type='interval' AND interval_seconds IS NOT NULL AND interval_start_at IS NOT NULL;
+CREATE INDEX idx_schedule_bindings_dag_version ON schedule_bindings(dag_version_id, node_id);
+CREATE INDEX idx_schedule_bindings_definition ON schedule_bindings(definition_id);
+CREATE INDEX idx_schedule_bindings_cron ON schedule_bindings(cron_spec) WHERE schedule_type='cron' AND cron_spec IS NOT NULL AND btrim(cron_spec) <> '';
+CREATE INDEX idx_schedule_bindings_interval ON schedule_bindings(interval_start_at, interval_seconds) WHERE schedule_type='interval' AND interval_seconds IS NOT NULL AND interval_start_at IS NOT NULL;
 CREATE INDEX idx_dags_namespace ON dags(namespace_id, name);
 CREATE INDEX idx_dag_versions_dag ON dag_versions(dag_id, version_number DESC);
 CREATE INDEX idx_dag_nodes_version ON dag_version_nodes(dag_version_id, node_key);

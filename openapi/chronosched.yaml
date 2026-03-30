@@ -653,7 +653,9 @@ components:
           type: string
       description: 'A schedule is either cron-based or interval-based. Cron schedules
         are aligned to wall clock time. Interval schedules start from `start_at`
-        and recur every `interval_seconds`.
+        and recur every `interval_seconds`. When provided inline on a job definition,
+        Chronosched materializes it into a schedule binding for each DAG node that
+        references that definition.
         '
     JobDefinition:
       type: object
