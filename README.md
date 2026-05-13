@@ -1,16 +1,26 @@
 # Chronosched
 
-Chronosched is a PostgreSQL-backed DAG scheduler written in Go.
+Chronosched is a distributed workflow execution system written in Go using PostgreSQL for durable coordination state.
 
-Chronosched separates three concerns into independent concepts:
+Chronosched focuses on:
+- distributed job execution
+- worker coordination
+- dependency handling
+- retries and recovery
+- durable execution state
+- observability and troubleshooting
+
+The design prioritizes reliability, predictable execution, and operational simplicity.
+
+Workflow definitions are versioned and immutable, allowing workflows to evolve safely without affecting existing runs.
+
+Chronosched separates three related concepts:
 
 - **job definitions** describe reusable work
-- **schedule bindings** determine when a DAG node runs
+- **schedule bindings** determine when work becomes eligible
 - **DAG versions** define orchestration and dependencies
 
-The scheduler operates on **schedule bindings** as the canonical scheduling model. A job definition may still declare an inline `schedule` as a convenience; Chronosched materializes that into a schedule binding for each DAG node that references the definition.
-
-At runtime, the scheduler creates **runs**, and each run materializes one or more **jobs** that the worker executes.
+At runtime, the scheduler creates **runs** containing executable **jobs** that workers dispatch and track through completion.
 
 ## Quick start (local demo)
 
@@ -43,13 +53,13 @@ Chronosched focuses on a few core design principles:
 - **Separation of concerns** between job definitions, schedules, and orchestration
 - **Reusable job definitions** across multiple workflows
 - **Immutable DAG versions** so workflows can evolve safely
-- **Deterministic execution semantics** for reliable orchestration
+- **Predictable execution behavior** for reliable workflows
 - **Durable state management** backed by PostgreSQL
 - **API-first integration** with external workers and services
-- **Explicit orchestration model** separating task definitions from workflow structure
-- **AI-assisted failure analysis** to explain workflow failures and recovery steps
+- **Reusable workflows** built from shared job definitions
+- **Structured failure analysis and recovery diagnostics**
 
-## Why this design
+## Scheduling and orchestration model
 
 A single job definition can be reused across multiple workflows.
 
@@ -59,14 +69,13 @@ For example, `sales-stats` might:
 - appear after `etl-load-sales` in one DAG
 - appear after `load -> validate` in another DAG
 
-Inline schedules on job definitions are treated as shorthand. Chronosched converts them into per-node schedule bindings, which lets scheduling remain explicit at runtime while keeping configuration lightweight for common cases.
+Inline schedules on job definitions are supported as a convenience. Chronosched converts them into per-node schedule bindings, which lets scheduling remain explicit at runtime while keeping configuration lightweight for common cases.
 
 That split makes reuse easier and allows workflows to evolve through new DAG versions without changing the underlying task definitions.
 
 ## When to use Chronosched
 
-Chronosched is designed for systems that require deterministic
-workflow orchestration with reusable job definitions.
+Chronosched is designed for systems that need reliable job execution, dependency handling, retries, and visibility into workflow state.
 
 Typical scenarios include:
 
@@ -76,8 +85,7 @@ Typical scenarios include:
 - **automation systems** that need durable execution state
 - **multi-tenant environments** where workflows must be isolated by namespace
 
-Because schedules, job definitions, and orchestration graphs are
-independent concepts, Chronosched works well in environments where
+Because schedules, jobs, and workflow structure are managed separately, Chronosched works well in environments where
 workflows may change while the underlying tasks remain reusable.
 
 ## System architecture
@@ -227,7 +235,7 @@ cron / interval optional]
     V2 --> Run3[Run 201]
 ```
 
-The same definitions can be reused while the orchestration evolves through new DAG versions.
+The same job definitions can be reused while workflows evolve through new DAG versions.
 
 ## Design tradeoffs
 
@@ -236,7 +244,7 @@ Chronosched intentionally makes several design tradeoffs:
 - PostgreSQL is used as the single source of truth, prioritizing consistency and simplicity over horizontal scalability
 - The execution model is callback-based (REST), favoring integration simplicity over tightly coupled workers
 - DAG versions are immutable, prioritizing safety and reproducibility over in-place mutation
-- Scheduling and orchestration are separated, improving reuse at the cost of additional conceptual complexity
+- Scheduling and orchestration are separated, improving reuse at the cost of additional configuration complexity
 
 ## Job execution lifecycle
 
