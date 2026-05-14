@@ -217,13 +217,6 @@ cron / interval optional]
     D3 --> V2
     D4 --> V2
 
-    subgraph Version1Graph[Version 1 graph]
-        V1A[etl]
-        V1B[stats]
-        V1C[email]
-        V1A --> V1B --> V1C
-    end
-
     subgraph Version2Graph[Version 2 graph]
         V2A[etl]
         V2B[validate]
@@ -232,6 +225,13 @@ cron / interval optional]
         V2A --> V2B --> V2C --> V2D
     end
 
+    subgraph Version1Graph[Version 1 graph]
+        V1A[etl]
+        V1B[stats]
+        V1C[email]
+        V1A --> V1B --> V1C
+    end
+    
     V1 --> Run1[Run 101]
     V1 --> Run2[Run 102]
     V2 --> Run3[Run 201]
