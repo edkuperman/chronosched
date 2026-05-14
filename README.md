@@ -201,6 +201,7 @@ flowchart TD
         D2[sales-stats
 cron / interval optional]
         D3[email-report]
+        D4[validate-sales]
     end
 
     subgraph DAG[DAG: weekly-sales]
@@ -214,6 +215,7 @@ cron / interval optional]
     D1 --> V2
     D2 --> V2
     D3 --> V2
+    D4 --> V2
 
     subgraph Version1Graph[Version 1 graph]
         V1A[etl]
