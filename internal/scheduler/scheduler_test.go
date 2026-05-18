@@ -106,6 +106,9 @@ func (f *fakeJobs) FindDueReadyWaiting(context.Context, time.Time, int) ([]*repo
 func (f *fakeJobs) FindWaitingBlockedByFailedDependency(context.Context, time.Time, int) ([]*repository.Job, error) {
 	return nil, nil
 }
+func (f *fakeJobs) FindStaleDispatching(context.Context, time.Time, int) ([]*repository.Job, error) {
+	return nil, nil
+}
 func (f *fakeJobs) FindStaleDispatched(context.Context, time.Time, int) ([]*repository.Job, error) {
 	return nil, nil
 }

@@ -85,11 +85,17 @@ func (s *Store) publishEvent(ctx context.Context, evt events.Event) {
 func (s *Store) loadJobEventMeta(ctx context.Context, q rowQueryer, jobID int64) (*jobEventMeta, error) {
 	var meta jobEventMeta
 	err := q.QueryRow(ctx, `
-SELECT d.namespace_id::text, dr.dag_id::text, j.run_id, j.job_id, j.node_key, j.status
-FROM jobs j
-JOIN dag_runs dr ON dr.run_id=j.run_id
-JOIN dags d ON d.dag_id=dr.dag_id
-WHERE j.job_id=$1`, jobID).Scan(&meta.NamespaceID, &meta.DAGID, &meta.RunID, &meta.JobID, &meta.NodeKey, &meta.Status)
+		SELECT 
+			d.namespace_id::text, 
+			dr.dag_id::text, 
+			j.run_id, 
+			j.job_id, 
+			j.node_key, 
+			j.status
+		FROM jobs j
+		JOIN dag_runs dr ON dr.run_id=j.run_id
+		JOIN dags d ON d.dag_id=dr.dag_id
+		WHERE j.job_id=$1`, jobID).Scan(&meta.NamespaceID, &meta.DAGID, &meta.RunID, &meta.JobID, &meta.NodeKey, &meta.Status)
 	if err != nil {
 		return nil, err
 	}
@@ -99,10 +105,14 @@ WHERE j.job_id=$1`, jobID).Scan(&meta.NamespaceID, &meta.DAGID, &meta.RunID, &me
 func (s *Store) loadRunEventMeta(ctx context.Context, q rowQueryer, runID int64) (*runEventMeta, error) {
 	var meta runEventMeta
 	err := q.QueryRow(ctx, `
-SELECT d.namespace_id::text, dr.dag_id::text, dr.run_id, dr.status, dr.trigger_type
-FROM dag_runs dr
-JOIN dags d ON d.dag_id=dr.dag_id
-WHERE dr.run_id=$1`, runID).Scan(&meta.NamespaceID, &meta.DAGID, &meta.RunID, &meta.Status, &meta.TriggerType)
+		SELECT 
+			d.namespace_id::text, 
+			dr.dag_id::text, 
+			dr.run_id, dr.status, 
+			dr.trigger_type
+		FROM dag_runs dr
+		JOIN dags d ON d.dag_id=dr.dag_id
+		WHERE dr.run_id=$1`, runID).Scan(&meta.NamespaceID, &meta.DAGID, &meta.RunID, &meta.Status, &meta.TriggerType)
 	if err != nil {
 		return nil, err
 	}
@@ -111,7 +121,13 @@ WHERE dr.run_id=$1`, runID).Scan(&meta.NamespaceID, &meta.DAGID, &meta.RunID, &m
 
 // ===== Namespaces =====
 func (s *Store) ListNamespaces(ctx context.Context) ([]repository.Namespace, error) {
-	rows, err := s.dal.DB.Query(ctx, `SELECT namespace_id::text, name, created_at FROM namespaces ORDER BY name`)
+	rows, err := s.dal.DB.Query(ctx, `
+		SELECT 
+			namespace_id::text, 
+			name, 
+			created_at 
+		FROM namespaces 
+		ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -129,8 +145,14 @@ func (s *Store) ListNamespaces(ctx context.Context) ([]repository.Namespace, err
 
 func (s *Store) CreateNamespace(ctx context.Context, name string) (*repository.Namespace, error) {
 	var n repository.Namespace
-	err := s.dal.DB.QueryRow(ctx, `INSERT INTO namespaces(name) VALUES($1) RETURNING namespace_id::text, name, created_at`, name).
-		Scan(&n.ID, &n.Name, &n.CreatedAt)
+	err := s.dal.DB.QueryRow(ctx, `
+		INSERT INTO namespaces(name) 
+		VALUES($1) 
+		RETURNING 
+			namespace_id::text, 
+			name, 
+			created_at`, 
+		name).Scan(&n.ID, &n.Name, &n.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -139,8 +161,14 @@ func (s *Store) CreateNamespace(ctx context.Context, name string) (*repository.N
 
 func (s *Store) GetNamespaceByName(ctx context.Context, name string) (*repository.Namespace, error) {
 	var n repository.Namespace
-	err := s.dal.DB.QueryRow(ctx, `SELECT namespace_id::text, name, created_at FROM namespaces WHERE name=$1`, name).
-		Scan(&n.ID, &n.Name, &n.CreatedAt)
+	err := s.dal.DB.QueryRow(ctx, `
+		SELECT 
+			namespace_id::text, 
+			name, 
+			created_at 
+		FROM namespaces 
+		WHERE name=$1`, 
+		name).Scan(&n.ID, &n.Name, &n.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -235,75 +263,105 @@ func hasScheduleConfig(sched *repository.Schedule) bool {
 
 func (s *Store) syncBindingsForDefinition(ctx context.Context, definitionID string) error {
 	_, err := s.dal.DB.Exec(ctx, `
-WITH def_sched AS (
-  SELECT definition_id, schedule_type, cron_spec, interval_seconds, interval_start_at, timezone, on_failure_policy, is_enabled, is_paused
-  FROM job_definitions
-  WHERE definition_id=$1
-), deleted AS (
-  DELETE FROM schedule_bindings sb
-  USING def_sched ds
-  WHERE sb.definition_id=ds.definition_id
-    AND sb.source_type='definition_inline'
-    AND (ds.schedule_type IS NULL OR ((ds.schedule_type='cron') AND (ds.cron_spec IS NULL OR btrim(ds.cron_spec)='')) OR (ds.schedule_type='interval' AND (ds.interval_seconds IS NULL OR ds.interval_start_at IS NULL)))
-  RETURNING sb.binding_id
-)
-INSERT INTO schedule_bindings(dag_version_id, node_id, definition_id, source_type, schedule_type, cron_spec, interval_seconds, interval_start_at, timezone, on_failure_policy, is_enabled, is_paused)
-SELECT n.dag_version_id, n.node_id, n.job_definition_id, 'definition_inline', ds.schedule_type, ds.cron_spec, ds.interval_seconds, ds.interval_start_at, ds.timezone, ds.on_failure_policy, ds.is_enabled, ds.is_paused
-FROM dag_version_nodes n
-JOIN def_sched ds ON ds.definition_id=n.job_definition_id
-WHERE ds.schedule_type IS NOT NULL
-  AND ((ds.schedule_type='cron' AND ds.cron_spec IS NOT NULL AND btrim(ds.cron_spec) <> '') OR (ds.schedule_type='interval' AND ds.interval_seconds IS NOT NULL AND ds.interval_seconds > 0 AND ds.interval_start_at IS NOT NULL))
-ON CONFLICT (node_id) DO UPDATE SET
-  schedule_type=EXCLUDED.schedule_type,
-  cron_spec=EXCLUDED.cron_spec,
-  interval_seconds=EXCLUDED.interval_seconds,
-  interval_start_at=EXCLUDED.interval_start_at,
-  timezone=EXCLUDED.timezone,
-  on_failure_policy=EXCLUDED.on_failure_policy,
-  is_enabled=EXCLUDED.is_enabled,
-  is_paused=EXCLUDED.is_paused,
-  updated_at=now()`, definitionID)
+		WITH 
+		def_sched AS (
+			SELECT 
+				definition_id, 
+				schedule_type, 
+				cron_spec, 
+				interval_seconds, 
+				interval_start_at, 
+				timezone, 
+				on_failure_policy, 
+				is_enabled, 
+				is_paused
+			FROM job_definitions
+			WHERE definition_id=$1
+		), 
+		deleted AS (
+			DELETE FROM schedule_bindings sb
+			USING def_sched ds
+			WHERE 
+				sb.definition_id=ds.definition_id
+				AND sb.source_type='definition_inline'
+				AND (ds.schedule_type IS NULL OR 
+					((ds.schedule_type='cron') AND (ds.cron_spec IS NULL OR btrim(ds.cron_spec)='')) OR 
+					(ds.schedule_type='interval' AND (ds.interval_seconds IS NULL OR ds.interval_start_at IS NULL)))
+			RETURNING sb.binding_id
+		)
+		INSERT INTO schedule_bindings(dag_version_id, node_id, definition_id, source_type, schedule_type, cron_spec, interval_seconds, interval_start_at, timezone, on_failure_policy, is_enabled, is_paused)
+		SELECT n.dag_version_id, n.node_id, n.job_definition_id, 'definition_inline', ds.schedule_type, ds.cron_spec, ds.interval_seconds, ds.interval_start_at, ds.timezone, ds.on_failure_policy, ds.is_enabled, ds.is_paused
+		FROM dag_version_nodes n
+		JOIN def_sched ds ON ds.definition_id=n.job_definition_id
+		WHERE ds.schedule_type IS NOT NULL
+			AND ((ds.schedule_type='cron' AND ds.cron_spec IS NOT NULL AND btrim(ds.cron_spec) <> '') OR 
+				(ds.schedule_type='interval' AND ds.interval_seconds IS NOT NULL AND ds.interval_seconds > 0 AND ds.interval_start_at IS NOT NULL))
+		ON CONFLICT (node_id) DO 
+			UPDATE SET
+				schedule_type=EXCLUDED.schedule_type,
+				cron_spec=EXCLUDED.cron_spec,
+				interval_seconds=EXCLUDED.interval_seconds,
+				interval_start_at=EXCLUDED.interval_start_at,
+				timezone=EXCLUDED.timezone,
+				on_failure_policy=EXCLUDED.on_failure_policy,
+				is_enabled=EXCLUDED.is_enabled,
+				is_paused=EXCLUDED.is_paused,
+				updated_at=now()`, 
+		definitionID)
 	return err
 }
 
 func (s *Store) syncNodeBindingFromDefinitionTx(ctx context.Context, tx pgx.Tx, dagVersionID, nodeID, definitionID string) error {
 	_, err := tx.Exec(ctx, `
-WITH def_sched AS (
-  SELECT definition_id, schedule_type, cron_spec, interval_seconds, interval_start_at, timezone, on_failure_policy, is_enabled, is_paused
-  FROM job_definitions
-  WHERE definition_id=$1
-), deleted AS (
-  DELETE FROM schedule_bindings sb
-  USING def_sched ds
-  WHERE sb.node_id=$2
-    AND sb.source_type='definition_inline'
-    AND (ds.schedule_type IS NULL OR ((ds.schedule_type='cron') AND (ds.cron_spec IS NULL OR btrim(ds.cron_spec)='')) OR (ds.schedule_type='interval' AND (ds.interval_seconds IS NULL OR ds.interval_start_at IS NULL)))
-  RETURNING sb.binding_id
-)
-INSERT INTO schedule_bindings(dag_version_id, node_id, definition_id, source_type, schedule_type, cron_spec, interval_seconds, interval_start_at, timezone, on_failure_policy, is_enabled, is_paused)
-SELECT $3, $2, ds.definition_id, 'definition_inline', ds.schedule_type, ds.cron_spec, ds.interval_seconds, ds.interval_start_at, ds.timezone, ds.on_failure_policy, ds.is_enabled, ds.is_paused
-FROM def_sched ds
-WHERE ds.schedule_type IS NOT NULL
-  AND ((ds.schedule_type='cron' AND ds.cron_spec IS NOT NULL AND btrim(ds.cron_spec) <> '') OR (ds.schedule_type='interval' AND ds.interval_seconds IS NOT NULL AND ds.interval_seconds > 0 AND ds.interval_start_at IS NOT NULL))
-ON CONFLICT (node_id) DO UPDATE SET
-  schedule_type=EXCLUDED.schedule_type,
-  cron_spec=EXCLUDED.cron_spec,
-  interval_seconds=EXCLUDED.interval_seconds,
-  interval_start_at=EXCLUDED.interval_start_at,
-  timezone=EXCLUDED.timezone,
-  on_failure_policy=EXCLUDED.on_failure_policy,
-  is_enabled=EXCLUDED.is_enabled,
-  is_paused=EXCLUDED.is_paused,
-  updated_at=now()`, definitionID, nodeID, dagVersionID)
+		WITH 
+		def_sched AS (
+			SELECT 
+				definition_id, 
+				schedule_type, 
+				cron_spec, 
+				interval_seconds, 
+				interval_start_at, 
+				timezone, 
+				on_failure_policy, 
+				is_enabled, 
+				is_paused
+			FROM job_definitions
+			WHERE definition_id=$1
+		), 
+		deleted AS (
+			DELETE FROM schedule_bindings sb
+			USING def_sched ds
+			WHERE sb.node_id=$2
+				AND sb.source_type='definition_inline'
+				AND (ds.schedule_type IS NULL OR ((ds.schedule_type='cron') AND (ds.cron_spec IS NULL OR btrim(ds.cron_spec)='')) OR (ds.schedule_type='interval' AND (ds.interval_seconds IS NULL OR ds.interval_start_at IS NULL)))
+			RETURNING sb.binding_id
+		)
+		INSERT INTO schedule_bindings(dag_version_id, node_id, definition_id, source_type, schedule_type, cron_spec, interval_seconds, interval_start_at, timezone, on_failure_policy, is_enabled, is_paused)
+		SELECT $3, $2, ds.definition_id, 'definition_inline', ds.schedule_type, ds.cron_spec, ds.interval_seconds, ds.interval_start_at, ds.timezone, ds.on_failure_policy, ds.is_enabled, ds.is_paused
+		FROM def_sched ds
+		WHERE ds.schedule_type IS NOT NULL
+			AND ((ds.schedule_type='cron' AND ds.cron_spec IS NOT NULL AND btrim(ds.cron_spec) <> '') OR (ds.schedule_type='interval' AND ds.interval_seconds IS NOT NULL AND ds.interval_seconds > 0 AND ds.interval_start_at IS NOT NULL))
+		ON CONFLICT (node_id) DO 
+			UPDATE SET
+				schedule_type=EXCLUDED.schedule_type,
+				cron_spec=EXCLUDED.cron_spec,
+				interval_seconds=EXCLUDED.interval_seconds,
+				interval_start_at=EXCLUDED.interval_start_at,
+				timezone=EXCLUDED.timezone,
+				on_failure_policy=EXCLUDED.on_failure_policy,
+				is_enabled=EXCLUDED.is_enabled,
+				is_paused=EXCLUDED.is_paused,
+				updated_at=now()`, 
+		definitionID, nodeID, dagVersionID)
 	return err
 }
 
 func (s *Store) ListByNamespace(ctx context.Context, namespaceID string) ([]repository.JobDefinition, error) {
 	rows, err := s.dal.DB.Query(ctx, `
-SELECT definition_id::text, namespace_id::text, name, description, kind, payload_template, schedule_type, cron_spec, interval_seconds, interval_start_at, timezone, on_failure_policy, is_enabled, is_paused, created_at, updated_at
-FROM job_definitions
-WHERE namespace_id=$1
-ORDER BY name`, namespaceID)
+		SELECT definition_id::text, namespace_id::text, name, description, kind, payload_template, schedule_type, cron_spec, interval_seconds, interval_start_at, timezone, on_failure_policy, is_enabled, is_paused, created_at, updated_at
+		FROM job_definitions
+		WHERE namespace_id=$1
+		ORDER BY name`, namespaceID)
 	if err != nil {
 		return nil, err
 	}
@@ -1599,7 +1657,15 @@ func (s *Store) RecordHeartbeat(ctx context.Context, id int64, heartbeatAt time.
 	if err != nil {
 		return err
 	}
-	tag, err := s.dal.DB.Exec(ctx, `UPDATE jobs SET status=CASE WHEN status='dispatched' THEN 'running' ELSE status END, started_at=COALESCE(started_at, CASE WHEN status='dispatched' THEN now() ELSE started_at END), last_heartbeat_at=$2, reason_detail=CASE WHEN NULLIF($3,'') IS NULL THEN reason_detail ELSE $3 END WHERE job_id=$1 AND status IN ('dispatched','running')`, id, heartbeatAt, detail)
+	tag, err := s.dal.DB.Exec(ctx, `
+	UPDATE jobs 
+	SET 
+		status=CASE WHEN status='dispatched' THEN 'running' ELSE status END, 
+		started_at=COALESCE(started_at, CASE WHEN status='dispatched' THEN now() ELSE started_at END), 
+		last_heartbeat_at=$2, 
+		reason_detail=CASE WHEN NULLIF($3,'') IS NULL THEN reason_detail ELSE $3 END 
+	WHERE job_id=$1 AND status IN ('dispatched','running')`, id, heartbeatAt, detail)
+
 	if err != nil {
 		return err
 	}
@@ -1758,6 +1824,32 @@ LIMIT $2`, before, limit)
 		if err := rows.Scan(&j.ID, &j.RunID, &j.Status, &j.Priority, &j.DueAt, &j.NodeKey, &j.DefID); err != nil {
 			return nil, err
 		}
+		out = append(out, &j)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) FindStaleDispatching(ctx context.Context, before time.Time, limit int) ([]*repository.Job, error) {
+	rows, err := s.dal.DB.Query(ctx, `SELECT job_id, run_id, status, priority, due_at, node_key, job_definition_id::text, dispatched_at, started_at, last_heartbeat_at, finished_at, external_execution_id, reason_code, reason_detail FROM jobs WHERE status='dispatching' AND lease_until IS NOT NULL AND lease_until <= $1 ORDER BY lease_until LIMIT $2`, before, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*repository.Job
+	for rows.Next() {
+		var j repository.Job
+		var dispatched, started, heartbeat, finished stdsql.NullTime
+		var externalID, reasonCode, reasonDetail stdsql.NullString
+		if err := rows.Scan(&j.ID, &j.RunID, &j.Status, &j.Priority, &j.DueAt, &j.NodeKey, &j.DefID, &dispatched, &started, &heartbeat, &finished, &externalID, &reasonCode, &reasonDetail); err != nil {
+			return nil, err
+		}
+		j.DispatchedAt = timePtr(dispatched)
+		j.StartedAt = timePtr(started)
+		j.LastHeartbeatAt = timePtr(heartbeat)
+		j.FinishedAt = timePtr(finished)
+		j.ExternalExecutionID = nullStringPtr(externalID)
+		j.ReasonCode = nullStringPtr(reasonCode)
+		j.ReasonDetail = nullStringPtr(reasonDetail)
 		out = append(out, &j)
 	}
 	return out, rows.Err()

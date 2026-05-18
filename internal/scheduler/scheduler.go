@@ -291,7 +291,21 @@ func (s *Scheduler) sweepBlockedJobs(ctx context.Context) error {
 }
 
 func (s *Scheduler) reapLostJobs(ctx context.Context) error {
-	dispatched, err := s.repos.Jobs.FindStaleDispatched(ctx, time.Now().UTC().Add(-s.startTimeout), s.batchSize)
+	now := time.Now().UTC()
+	dispatching, err := s.repos.Jobs.FindStaleDispatching(ctx, now, s.batchSize)
+	if err != nil {
+		return err
+	}
+	for _, j := range dispatching {
+		if err := s.repos.Jobs.MarkLost(ctx, j.ID, "dispatch_result_timeout", "worker leased the job but did not report a dispatch result before the lease expired"); err != nil {
+			logger.Error(err, "mark lost (dispatch result timeout) failed", "jobID", j.ID)
+			continue
+		}
+		if runID, err := s.repos.Jobs.GetRunID(ctx, j.ID); err == nil {
+			_ = s.repos.Runs.RefreshStatus(ctx, runID)
+		}
+	}
+	dispatched, err := s.repos.Jobs.FindStaleDispatched(ctx, now.Add(-s.startTimeout), s.batchSize)
 	if err != nil {
 		return err
 	}
@@ -304,7 +318,7 @@ func (s *Scheduler) reapLostJobs(ctx context.Context) error {
 			_ = s.repos.Runs.RefreshStatus(ctx, runID)
 		}
 	}
-	running, err := s.repos.Jobs.FindStaleRunning(ctx, time.Now().UTC().Add(-s.heartbeatTimeout), s.batchSize)
+	running, err := s.repos.Jobs.FindStaleRunning(ctx, now.Add(-s.heartbeatTimeout), s.batchSize)
 	if err != nil {
 		return err
 	}

@@ -15,6 +15,9 @@ func (j *JobSQL) FindDueReadyWaiting(ctx context.Context, before time.Time, limi
 func (j *JobSQL) FindWaitingBlockedByFailedDependency(ctx context.Context, before time.Time, limit int) ([]*repository.Job, error) {
 	return j.store.FindWaitingBlockedByFailedDependency(ctx, before, limit)
 }
+func (j *JobSQL) FindStaleDispatching(ctx context.Context, before time.Time, limit int) ([]*repository.Job, error) {
+	return j.store.FindStaleDispatching(ctx, before, limit)
+}
 func (j *JobSQL) FindStaleDispatched(ctx context.Context, before time.Time, limit int) ([]*repository.Job, error) {
 	return j.store.FindStaleDispatched(ctx, before, limit)
 }

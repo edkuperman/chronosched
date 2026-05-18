@@ -96,6 +96,7 @@ type BlockingParent struct {
 type JobRepository interface {
 	FindDueReadyWaiting(ctx context.Context, before time.Time, limit int) ([]*Job, error)
 	FindWaitingBlockedByFailedDependency(ctx context.Context, before time.Time, limit int) ([]*Job, error)
+	FindStaleDispatching(ctx context.Context, before time.Time, limit int) ([]*Job, error)
 	FindStaleDispatched(ctx context.Context, before time.Time, limit int) ([]*Job, error)
 	FindStaleRunning(ctx context.Context, before time.Time, limit int) ([]*Job, error)
 	MarkQueued(ctx context.Context, id int64) error
